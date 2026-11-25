@@ -451,11 +451,15 @@ class RuleBasedExperimentDesigner:
         grounded_lower = grounded_options.lower()
         hyp_lower = hypothesis.lower()
 
-        dataset_name = next((d for d in KNOWN_DATASETS if d.lower() in hyp_lower), None)
-        if not dataset_name:
-            dataset_name = "PACS" if "pacs" in grounded_lower else "OfficeHome"
-
-        arch_name = next((a for a in KNOWN_ARCHITECTURES if a.lower() in hyp_lower), "Proposed Architecture")
+        if_match = re.search(r"If\s+(.+?)\s+is\s+evaluated\s+on\s+([^,]+)", hypothesis, re.I)
+        if if_match:
+            arch_name = if_match.group(1).strip()
+            dataset_name = if_match.group(2).strip()
+        else:
+            dataset_name = next((d for d in KNOWN_DATASETS if d.lower() in hyp_lower), None)
+            if not dataset_name:
+                dataset_name = "PACS" if "pacs" in grounded_lower else "OfficeHome"
+            arch_name = next((a for a in KNOWN_ARCHITECTURES if a.lower() in hyp_lower), "Proposed Architecture")
 
         # Separate independent variable from baseline cleanly
         if is_cnn_architecture(arch_name):

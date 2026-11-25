@@ -191,13 +191,25 @@ def test_ask_the_papers_answers_gap_and_unrelated_questions_properly():
     papers = get_sample_corpus()
     res = run_full_pipeline(papers, llm_fn=None)
 
-    # Asking how to build with gaps should give an actionable plan, NOT random paper quotes
-    ans_gap, _, mode = answer_workspace_question("how do i build with any of the gaps", res, llm_fn=None)
-    assert "To build on the candidate gaps" in ans_gap
-    assert "Recommended first build" in ans_gap
-    assert "EBA" not in ans_gap
+    # 1. "tell me about the gaps" lists the candidate gaps and ratings
+    ans_about, _, _ = answer_workspace_question("tell me about the gaps", res, llm_fn=None)
+    assert "Found" in ans_about and "candidate gaps" in ans_about
 
-    # Asking a completely unrelated question should decline instead of matching generic words like "build"
+    # 2. "tell in a simple way so i can understand the gaps so i can build it" gives plain-English explanation + build
+    ans_simple, _, _ = answer_workspace_question("tell in a simple way so i can understand the gaps so i can build it", res, llm_fn=None)
+    assert "In simple terms:" in ans_simple
+    assert "How you can build & test it:" in ans_simple
+
+    # 3. "how do i build with any of the gaps" gives concrete experiment steps
+    ans_build, _, _ = answer_workspace_question("how do i build with any of the gaps", res, llm_fn=None)
+    assert "Recommended build" in ans_build
+
+    # All 3 answers must be distinct!
+    assert ans_about != ans_simple
+    assert ans_simple != ans_build
+    assert ans_about != ans_build
+
+    # 4. Unrelated question declines instead of matching generic words like "build"
     ans_unrel, passages_unrel, _ = answer_workspace_question("how do i build a rocket ship", res, llm_fn=None)
     assert passages_unrel == ""
     assert "do not answer this question" in ans_unrel.lower()

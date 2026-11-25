@@ -471,38 +471,83 @@ def answer_workspace_question(
     )
 
     if is_meta_query:
-        if not result.candidate_gaps and not result.experiment_plans:
+        if not result.candidate_gaps and not result.experiment_plans and not result.contradictions:
             return (
-                "No candidate gaps or experiment plans were generated for the current corpus yet. "
+                "No candidate gaps, contradictions, or experiment plans were generated for the current corpus yet. "
                 "Try searching a broader topic or uploading papers with explicit models and benchmarks.",
                 "",
                 "Analysis Summary (No LLM)",
             )
 
+        wants_simple = any(w in q_low for w in ["simple", "understand", "explain", "easy", "plain", "beginner"])
+        wants_build = any(w in q_low for w in ["build", "experiment", "steps", "run", "implement", "how do i"])
+        wants_contradictions = any(w in q_low for w in ["contradiction", "disagree", "conflict"])
+        wants_hypotheses = any(w in q_low for w in ["hypothesis", "hypotheses", "critic"])
+
         lines: List[str] = []
-        if result.candidate_gaps:
-            top_gaps = [g["gap_label"] for g in result.candidate_gaps[:3]]
-            lines.append(
-                f"To build on the candidate gaps found in this corpus, start with one of these untested combinations: "
-                f"{'; '.join(top_gaps)}."
-            )
 
-        if result.experiment_plans:
-            _, plan = result.experiment_plans[0]
-            steps_preview = " ".join(plan.procedure[:4])
-            lines.append(
-                f"Recommended first build ({plan.research_question}): "
-                f"Use {plan.dataset_and_split} Compare against {', '.join(plan.baselines)} "
-                f"using {', '.join(plan.metrics)}. Steps: {steps_preview}"
-            )
-            lines.append(
-                f"Before trusting the result, run {plan.seeds_and_runs} and verify the baseline split in the original papers."
-            )
-        elif result.hypotheses:
-            _, hyp = result.hypotheses[0]
-            lines.append(f"Top hypothesis to test: {hyp.statement or hyp.reason}")
+        if wants_contradictions:
+            if not result.contradictions:
+                lines.append("No cross-paper contradictions could be checked yet because fewer than two papers reported comparable numeric metrics.")
+            else:
+                lines.append(f"Checked {len(result.contradictions)} cross-paper result pairs:")
+                for pair_title, cj in result.contradictions[:4]:
+                    lines.append(f"- **{pair_title}** ({cj.classification}): {cj.explanation}")
+        elif wants_hypotheses:
+            if not result.hypotheses:
+                lines.append("No hypotheses were generated from the current corpus.")
+            else:
+                lines.append(f"Generated {len(result.hypotheses)} testable hypotheses:")
+                for idx, (gap_label, hyp) in enumerate(result.hypotheses[:4], start=1):
+                    lines.append(f"- **H{idx} ({gap_label}):** {hyp.statement or hyp.reason}")
+        elif wants_simple and wants_build:
+            # Simple explanation of gaps + how to build
+            if result.candidate_gaps:
+                top_gap = result.candidate_gaps[0]
+                lines.append(
+                    f"**In simple terms:** Across the papers we read, researchers used **{top_gap['architecture']}** on some problems "
+                    f"and tested on **{top_gap['dataset']}** in other papers, but they did not report testing **{top_gap['architecture']}** on **{top_gap['dataset']}** together."
+                )
+            if result.experiment_plans:
+                _, plan = result.experiment_plans[0]
+                lines.append(
+                    f"**How you can build & test it:** Take **{plan.dataset_and_split}** and compare **{plan.independent_variable}** "
+                    f"against **{', '.join(plan.baselines)}** using **{', '.join(plan.metrics)}**. "
+                    f"Run each setup 3 times with different random seeds so the comparison is fair."
+                )
+        elif wants_simple:
+            # Simple explanation of the gaps only
+            if result.candidate_gaps:
+                lines.append("**Here is what the gaps mean in plain English:**")
+                for g in result.candidate_gaps[:4]:
+                    lines.append(
+                        f"- **{g['gap_label']}**: The papers mention using *{g['architecture']}* and testing on *{g['dataset']}* separately, "
+                        f"but this specific combination was not reported in the papers we read."
+                    )
+                lines.append("Note: A 'candidate gap' just means it wasn't in these papers—always double-check outside literature before claiming it is brand new.")
+        elif wants_build:
+            if result.candidate_gaps:
+                top_gaps = [g["gap_label"] for g in result.candidate_gaps[:3]]
+                lines.append(f"**Candidate gaps to build on:** {'; '.join(top_gaps)}.")
+            if result.experiment_plans:
+                _, plan = result.experiment_plans[0]
+                steps_preview = " ".join(plan.procedure[:5])
+                lines.append(
+                    f"**Recommended build ({plan.research_question}):**\n"
+                    f"- Dataset: {plan.dataset_and_split}\n"
+                    f"- Baselines: {', '.join(plan.baselines)}\n"
+                    f"- Metrics: {', '.join(plan.metrics)}\n"
+                    f"- Steps: {steps_preview}"
+                )
+        else:
+            # General overview of candidate gaps ("tell me about the gaps")
+            if result.gap_assessments:
+                lines.append(f"**Found {len(result.candidate_gaps)} candidate gaps in this corpus:**")
+                for gap_label, assessment in result.gap_assessments[:4]:
+                    lines.append(f"- **{gap_label}** (rating: *{assessment.rating}*): {assessment.reason}")
+            elif result.candidate_gaps:
+                lines.append(f"Candidate gaps found: {', '.join(g['gap_label'] for g in result.candidate_gaps[:4])}.")
 
-        # Also include any relevant paper passages if found
         passages_str, _ = retrieve_passages(question, result.all_chunks, top_k=3)
         return "\n\n".join(lines), passages_str, "Grounded in Analysis Results"
 
