@@ -1066,64 +1066,43 @@ with tabs[5]:
 # --- TAB 7: Topic & Scope Advisor ---
 with tabs[6]:
     st.subheader("Topic & Scope Advisor")
-    st.caption("Short scope interview -> recommends 3-5 mini or major options grounded strictly in the active Gap Matrix.")
+    st.caption("Type any topic on your mind to search related papers and get 3–5 concrete Mini or Major project options grounded in the Gap Matrix.")
 
-    if "topic_interview_answers" not in st.session_state:
-        st.session_state["topic_interview_answers"] = {}
+    tc1, tc2 = st.columns([3, 1])
+    with tc1:
+        mind_topic = st.text_input(
+            "What topic or idea is on your mind?",
+            placeholder="e.g., brain tumor MRI classification, domain generalization, time series forecasting...",
+            key="advisor_mind_topic",
+        )
+    with tc2:
+        st.markdown("<div style='height:1.7rem;'></div>", unsafe_allow_html=True)
+        advisor_search_btn = st.button("Search & Suggest Topics", type="primary", width="stretch", key="advisor_search_btn")
 
-    ans_dict = st.session_state["topic_interview_answers"]
-    interview_res = PromptRunner().run_topic_interview(answers=ans_dict, llm_fn=llm_callable)
-    interview_state = interview_res.data
-
-    with st.expander("Guided Interview (Prompt 10)", expanded=not interview_state.ready):
-        if interview_state.ready:
-            st.success("All 6 interview fields collected. Recommendations below are tailored to your answers.")
-            st.json(ans_dict)
-        else:
-            current_field = interview_state.missing_fields[0]
-            st.markdown(f"**Question ({len(ans_dict) + 1}/6):** {interview_state.next_question}")
-            st.caption(f"Missing fields: {', '.join(interview_state.missing_fields)}")
-            with st.form("topic_interview_form", clear_on_submit=True):
-                user_ans = st.text_input("Your answer", key="topic_interview_input")
-                submitted = st.form_submit_button("Save Answer")
-                if submitted and user_ans.strip():
-                    ans_dict[current_field] = user_ans.strip()
+    if advisor_search_btn and mind_topic.strip():
+        with st.spinner(f"Searching papers for '{mind_topic.strip()}' and extracting research topics..."):
+            found_meta = discover_papers(
+                mind_topic.strip(),
+                sources=["arXiv", "OpenAlex", "Semantic Scholar"],
+                max_results=12,
+            )
+            if not found_meta:
+                st.warning("No papers found for that topic. Try broader keywords.")
+            else:
+                fetched_docs = fetch_paper_documents(found_meta, download_pdf=False)
+                if fetched_docs:
+                    new_res = run_full_pipeline(fetched_docs, llm_fn=llm_callable)
+                    st.session_state.pipeline_result = new_res
+                    st.session_state.active_corpus_sig = compute_corpus_signature(fetched_docs)
                     st.rerun()
-        if ans_dict and st.button("Reset Interview", key="reset_topic_interview"):
-            st.session_state["topic_interview_answers"] = {}
-            st.rerun()
-
-    # Derive defaults from guided interview if answered
-    default_goal_idx = 0
-    lvl_ans = str(ans_dict.get("project_level", "")).lower()
-    if "mini" in lvl_ans:
-        default_goal_idx = 1
-    elif "major" in lvl_ans or "thesis" in lvl_ans:
-        default_goal_idx = 2
-
-    default_compute_idx = 1
-    comp_ans = str(ans_dict.get("compute_access", "")).lower()
-    if any(k in comp_ans for k in ["none", "laptop", "cpu"]):
-        default_compute_idx = 0
-    elif "multi" in comp_ans:
-        default_compute_idx = 2
-
-    default_weeks = 6
-    try:
-        import re as _re
-        wk_match = _re.search(r"\d+", str(ans_dict.get("available_weeks", "")))
-        if wk_match:
-            default_weeks = max(2, min(16, int(wk_match.group(0))))
-    except Exception:
-        pass
 
     sc1, sc2, sc3 = st.columns(3)
     with sc1:
-        target_scope = st.selectbox("Target Project Scale", ["Any", "Mini Project", "Major Project"], index=default_goal_idx)
+        target_scope = st.selectbox("Target Project Scale", ["Any", "Mini Project", "Major Project"], index=0)
     with sc2:
-        compute_budget = st.selectbox("Available Compute", ["CPU / Colab Free", "Single GPU", "Multi-GPU"], index=default_compute_idx)
+        compute_budget = st.selectbox("Available Compute", ["CPU / Colab Free", "Single GPU", "Multi-GPU"], index=1)
     with sc3:
-        timeline_weeks = st.slider("Available Timeline (weeks)", min_value=2, max_value=16, value=default_weeks)
+        timeline_weeks = st.slider("Available Timeline (weeks)", min_value=2, max_value=16, value=6)
 
     # Prepare grounded inputs for Prompt 11 (Topic & Scope Recommender)
     enriched_gaps = []
@@ -1143,22 +1122,30 @@ with tabs[6]:
             "supporting_paper_ids": sup_ids,
         })
 
-    con_inputs = [
-        {
+    import re as _re_con
+    con_inputs = []
+    for pair_title, cj in result.contradictions:
+        pids_found = _re_con.findall(r"\bP-[A-Z0-9]+\b", pair_title)
+        pa = pids_found[0] if len(pids_found) >= 1 else ""
+        pb = pids_found[1] if len(pids_found) >= 2 else ""
+        rec_a = result.literature_records.get(pa)
+        ds_name = (rec_a.datasets[0] if rec_a and rec_a.datasets else "") or "the shared task"
+        con_inputs.append({
+            "paper_a_id": pa,
+            "paper_b_id": pb,
+            "dataset": ds_name,
             "pair": pair_title,
             "classification": cj.classification,
             "confidence_score": cj.confidence_score,
             "conflict_factors": cj.conflict_factors,
             "explanation": cj.explanation,
-        }
-        for pair_title, cj in result.contradictions
-    ]
+        })
     scope_criteria_str = f"target_scale={target_scope}, compute_budget={compute_budget}, available_weeks={timeline_weeks}"
     allowed_pids = [p.paper_id for p in result.papers]
     allowed_ds = sorted({d for rec in result.literature_records.values() for d in rec.datasets})
 
     rec_exec = PromptRunner().run_topic_recommendation(
-        profile=ans_dict or {"available_weeks": timeline_weeks, "compute_access": compute_budget, "project_level": target_scope},
+        profile={"field_of_interest": mind_topic.strip() or "loaded papers", "available_weeks": timeline_weeks, "compute_access": compute_budget, "project_level": target_scope},
         gaps=enriched_gaps,
         contradictions=con_inputs,
         scope_criteria=scope_criteria_str,
