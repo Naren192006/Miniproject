@@ -747,18 +747,46 @@ with tabs[2]:
         goal=goal_scope,
     )
     scoped_recs = recommend_scoped_topics(interview, result, max_options=5)
+    paper_title_map = {p.paper_id: p.title for p in result.papers}
+
+    def _explain_gap_simply(gap_label_str: str) -> str:
+        if " on " not in gap_label_str:
+            return f"This combination ({gap_label_str}) did not appear in the {len(result.papers)} loaded papers."
+        arch_part, ds_part = [x.strip() for x in gap_label_str.split(" on ", 1)]
+        arch_papers = [
+            pid for pid, rec in result.literature_records.items()
+            if any(arch_part.lower() in a.lower() or a.lower() in arch_part.lower() for a in rec.architectures)
+        ]
+        ds_papers = [
+            pid for pid, rec in result.literature_records.items()
+            if any(ds_part.lower() in d.lower() or d.lower() in ds_part.lower() for d in rec.datasets)
+        ]
+        a_txt = ", ".join(arch_papers[:3]) if arch_papers else "some papers"
+        d_txt = ", ".join(ds_papers[:3]) if ds_papers else "other papers"
+        return (
+            f"In the {len(result.papers)} papers searched, {arch_part} appears in {a_txt} and "
+            f"{ds_part} appears in {d_txt}, but none of them tested {arch_part} on {ds_part} together."
+        )
+
     if not scoped_recs:
         st.info("No candidate gaps in the matrix yet to scope.")
     for rec_item in scoped_recs:
         scope_variant = "green" if rec_item.scope_label == "mini" else "blue"
-        paper_pills = "".join(pill(pid, "slate") for pid in rec_item.motivating_papers)
+        paper_pills = "".join(
+            pill(f"{pid}: {paper_title_map.get(pid, '')[:38]}", "slate")
+            for pid in rec_item.motivating_papers
+        )
         risk_items = "".join(f"<li>{esc(rk)}</li>" for rk in rec_item.risks)
+        easy_gap = _explain_gap_simply(rec_item.gap_label)
         st.markdown(
             f"""<div class="hf-card">
                 <div class="hf-card-title">{esc(rec_item.gap_label)} {pill(rec_item.scope_label.upper(), scope_variant)}</div>
-                <div style="margin-bottom:0.45rem;"><strong>Motivating Papers:</strong> {paper_pills}</div>
+                <div style="background:#f8fafc; border-left:3px solid #2563eb; padding:0.45rem 0.7rem; margin-bottom:0.5rem; font-size:0.89rem; color:#1e293b;">
+                    <strong>Easy Explanation:</strong> {esc(easy_gap)}
+                </div>
+                <div style="margin-bottom:0.45rem;"><strong>Related Papers:</strong> {paper_pills}</div>
                 <div style="font-size:0.88rem; color:#334155;"><strong>Required Compute:</strong> {esc(rec_item.required_compute)}</div>
-                <div style="font-size:0.88rem; color:#334155; margin-top:0.25rem;"><strong>Fit:</strong> {esc(rec_item.fit_reason)}</div>
+                <div style="font-size:0.88rem; color:#334155; margin-top:0.25rem;"><strong>Scope Fit:</strong> {esc(rec_item.fit_reason)}</div>
                 <div style="font-size:0.82rem; font-weight:600; color:#475569; margin-top:0.4rem;">Risks:</div>
                 <ul style="margin:0.2rem 0 0 1.2rem; color:#334155; font-size:0.85rem;">{risk_items}</ul>
             </div>""",
@@ -772,12 +800,16 @@ with tabs[2]:
         st.info("No candidate gaps detected in the current corpus.")
     for gap_label, assessment in result.gap_assessments:
         qs_html = "".join(f"<li>{esc(q)}</li>" for q in assessment.questions_to_check)
+        easy_gap = _explain_gap_simply(gap_label)
         st.markdown(
             f"""<div class="hf-card">
                 <div class="hf-card-title">{esc(gap_label)}</div>
                 <div style="margin-bottom:0.55rem;">
                     {verdict_pill(f"Rating: {assessment.rating}")}
                     {pill(f"Absence: {assessment.absence_explanation}", "slate")}
+                </div>
+                <div style="background:#f8fafc; border-left:3px solid #2563eb; padding:0.45rem 0.7rem; margin-bottom:0.5rem; font-size:0.89rem; color:#1e293b;">
+                    <strong>What's Missing:</strong> {esc(easy_gap)}
                 </div>
                 <p style="margin-bottom:0.5rem; color:#334155;">{esc(assessment.reason)}</p>
                 <div style="font-size:0.85rem; font-weight:600; color:#475569;">Questions to Check:</div>
@@ -804,11 +836,66 @@ with tabs[3]:
 
     if not result.contradictions:
         st.info("Need at least two papers with numeric results to compare pairs.")
+    import re as _re_ui
+    paper_title_lookup = {p.paper_id: p.title for p in result.papers}
     for pair_title, cj in result.contradictions:
         cond_html = "".join(f"<li>{esc(c)}</li>" for c in cj.conditions_to_verify)
         conf_pct = int(round(cj.confidence_score * 100))
         conf_variant = "green" if conf_pct >= 75 else ("amber" if conf_pct >= 50 else "red")
         factor_pills = "".join(pill(f"Factor: {f}", "blue") for f in cj.conflict_factors)
+
+        pids = _re_ui.findall(r"\bP-[A-Z0-9]+\b", pair_title)
+        pa_id = pids[0] if len(pids) >= 1 else "Paper A"
+        pb_id = pids[1] if len(pids) >= 2 else "Paper B"
+        pa_title = paper_title_lookup.get(pa_id, pa_id)
+        pb_title = paper_title_lookup.get(pb_id, pb_id)
+
+        rec_a = result.literature_records.get(pa_id)
+        rec_b = result.literature_records.get(pb_id)
+        res_a = rec_a.reported_results[0] if rec_a and rec_a.reported_results else None
+        res_b = rec_b.reported_results[0] if rec_b and rec_b.reported_results else None
+
+        def _fmt_side(pid_str: str, title_str: str, rec_obj, res_obj) -> str:
+            ds = (res_obj.dataset if res_obj and res_obj.dataset else None) or (", ".join(rec_obj.datasets[:2]) if rec_obj and rec_obj.datasets else "Not stated")
+            arch = (getattr(res_obj, "model", None) if res_obj else None) or (", ".join(rec_obj.architectures[:2]) if rec_obj and rec_obj.architectures else "Not stated")
+            met = res_obj.metric if res_obj and res_obj.metric else "Not stated"
+            val = str(res_obj.value) if res_obj and res_obj.value is not None else "Not stated"
+            spl = str(rec_obj.evaluation_protocol)[:60] if rec_obj and rec_obj.evaluation_protocol else "Not stated"
+            return (
+                f"<strong>{esc(pid_str)}</strong> — {esc(title_str[:65])}<br>"
+                f"<span style='font-size:0.83rem; color:#475569;'>"
+                f"Model: <b>{esc(arch)}</b> · Dataset: <b>{esc(ds)}</b> · Metric: <b>{esc(met)}</b> · Value: <b>{esc(val)}</b> · Split: <b>{esc(spl)}</b>"
+                f"</span>"
+            )
+
+        side_a_html = _fmt_side(pa_id, pa_title, rec_a, res_a)
+        side_b_html = _fmt_side(pb_id, pb_title, rec_b, res_b)
+
+        # Plain-English issue summary
+        cls_low = cj.classification.lower()
+        factors_txt = ", ".join(cj.conflict_factors) if cj.conflict_factors else "dataset, metric, or split"
+        scale_note = ""
+        if res_a and res_b and res_a.value is not None and res_b.value is not None:
+            try:
+                va, vb = float(res_a.value), float(res_b.value)
+                if (va > 1.0 and vb <= 1.0) or (vb > 1.0 and va <= 1.0):
+                    scale_note = " Note: one number is > 1 (likely %) while the other is <= 1 (likely 0-1 decimal or a different metric)."
+            except Exception:
+                pass
+
+        if "insufficient" in cls_low:
+            issue_line = f"Issue: Cannot tell if these conflict yet because {factors_txt} details are missing in one or both papers.{scale_note}"
+            issue_bg, issue_border = "#fffbeb", "#d97706"
+        elif "non-comparable" in cls_low:
+            issue_line = f"Issue: Apples-to-oranges comparison — the papers differ on {factors_txt}, so the numbers cannot be compared directly.{scale_note}"
+            issue_bg, issue_border = "#eff6ff", "#2563eb"
+        elif "disagreement" in cls_low:
+            issue_line = f"Issue: Real conflict candidate — both papers used comparable settings, yet reported different results.{scale_note}"
+            issue_bg, issue_border = "#fef2f2", "#dc2626"
+        else:
+            issue_line = f"No conflict: Both papers report consistent results under comparable settings.{scale_note}"
+            issue_bg, issue_border = "#f0fdf4", "#16a34a"
+
         st.markdown(
             f"""<div class="hf-card">
                 <div class="hf-card-title">{esc(pair_title)}</div>
@@ -816,6 +903,13 @@ with tabs[3]:
                     {verdict_pill(cj.classification)}
                     {pill(f"Confidence: {conf_pct}%", conf_variant)}
                     {factor_pills}
+                </div>
+                <div style="background:{issue_bg}; border-left:3px solid {issue_border}; padding:0.45rem 0.7rem; margin-bottom:0.55rem; font-size:0.89rem; color:#1e293b;">
+                    <strong>{esc(issue_line)}</strong>
+                </div>
+                <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:0.55rem 0.75rem; margin-bottom:0.55rem; font-size:0.86rem; color:#1e293b;">
+                    <div style="margin-bottom:0.35rem;">{side_a_html}</div>
+                    <div>{side_b_html}</div>
                 </div>
                 <p style="margin-bottom:0.5rem; color:#334155;">{esc(cj.explanation)}</p>
                 <div style="font-size:0.85rem; font-weight:600; color:#475569;">Conditions to Verify:</div>

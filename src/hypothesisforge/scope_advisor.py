@@ -101,10 +101,9 @@ def recommend_scoped_topics(
             score += 2
 
         fit_reason = (
-            f"Grounded in gap matrix ({gap_label}); labelled '{scope}' based on {arch} and {dataset} scale. "
-            f"Matches a {interview.timeline_weeks}-week timeline with {interview.compute_budget}."
+            f"No paper in this set tested {arch} on {dataset} together ({scope} scope; fits {interview.timeline_weeks} weeks on {interview.compute_budget})."
             if score >= 3
-            else f"Grounded in gap matrix ({gap_label}); labelled '{scope}'. Requires careful scoping for {interview.compute_budget}."
+            else f"No paper in this set tested {arch} on {dataset} together ({scope} scope; check {interview.compute_budget} capacity)."
         )
 
         recommendations.append(
