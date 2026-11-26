@@ -20,6 +20,7 @@ from .models import (
     EvidenceAnswerOutput,
     QueryRewriteOutput,
     TopicInterviewOutput,
+    TopicRecommendationOutput,
     count_words,
 )
 
@@ -499,5 +500,64 @@ class ResponseValidator:
                 error_message=msg,
                 retry_prompt=f"Validation errors:\n{msg}\nAsk ONE short plain-language question for the most important missing field, or set ready: true if none are missing.",
             )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
+    def validate_topic_recommendation(
+        cls,
+        raw_text: str,
+        allowed_paper_ids: Optional[List[str]] = None,
+        allowed_datasets: Optional[List[str]] = None,
+    ) -> ValidationResult:
+        """Validates Prompt 11 (11_topic_recommender.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the schema.",
+            )
+
+        try:
+            output = TopicRecommendationOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nFix schema errors and never use 'novel', 'first', 'unexplored', or 'state of the art'.",
+            )
+
+        if allowed_paper_ids:
+            allowed_set = {p.strip() for p in allowed_paper_ids if p.strip()}
+            for opt in output.options:
+                bad_ev = [p for p in opt.evidence_ids if p not in allowed_set]
+                bad_read = [p for p in opt.papers_to_read if p not in allowed_set]
+                if bad_ev or bad_read:
+                    msg = f"Rule violation: Do not invent paper IDs. Unknown IDs: {bad_ev + bad_read}"
+                    return ValidationResult(
+                        is_valid=False,
+                        data=output,
+                        raw_json=parsed_json,
+                        error_message=msg,
+                        retry_prompt=f"{msg}\nUse only paper IDs from the provided input.",
+                    )
+
+        if allowed_datasets:
+            allowed_ds_low = {d.strip().lower() for d in allowed_datasets if d.strip()}
+            for opt in output.options:
+                bad_ds = [d for d in opt.datasets if d.strip().lower() not in allowed_ds_low]
+                if bad_ds:
+                    msg = f"Rule violation: Do not invent datasets. Unknown datasets: {bad_ds}"
+                    return ValidationResult(
+                        is_valid=False,
+                        data=output,
+                        raw_json=parsed_json,
+                        error_message=msg,
+                        retry_prompt=f"{msg}\nUse only datasets from the provided input.",
+                    )
 
         return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

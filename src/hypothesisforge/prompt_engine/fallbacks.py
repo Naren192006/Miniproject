@@ -19,6 +19,8 @@ from .models import (
     EvidenceAnswerOutput,
     QueryRewriteOutput,
     TopicInterviewOutput,
+    TopicOptionItem,
+    TopicRecommendationOutput,
     count_words,
 )
 
@@ -755,3 +757,132 @@ class RuleBasedTopicInterviewer:
         if not missing:
             return TopicInterviewOutput(ready=True, next_question="", missing_fields=[])
         return TopicInterviewOutput(ready=False, next_question=next_q, missing_fields=missing)
+
+
+class RuleBasedTopicRecommender:
+    """Deterministic fallback for Prompt 11 (Topic & Scope Recommender)."""
+
+    MAJOR_DATASETS = {"domainnet", "imagenet", "coco", "mmlu", "wikitext"}
+    HEAVY_MODELS = {"vit", "vision transformer", "gpt", "llama", "bert", "resnet-101"}
+
+    @classmethod
+    def recommend(
+        cls,
+        gaps: Any,
+        contradictions: Any,
+        profile: Any = "",
+        scope_criteria: Any = "",
+        n_papers: int = 0,
+    ) -> TopicRecommendationOutput:
+        # Parse gaps list
+        gap_items: List[Dict[str, Any]] = []
+        if isinstance(gaps, list):
+            gap_items = [g for g in gaps if isinstance(g, dict)]
+        elif isinstance(gaps, str) and gaps.strip():
+            try:
+                loaded = json.loads(gaps)
+                if isinstance(loaded, list):
+                    gap_items = [g for g in loaded if isinstance(g, dict)]
+            except Exception:
+                for line in gaps.splitlines():
+                    line = line.strip("-• ").strip()
+                    if " on " in line:
+                        arch, ds = line.split(" on ", 1)
+                        gap_items.append({"architecture": arch.strip(), "dataset": ds.strip(), "gap_label": line})
+
+        # Parse contradictions list
+        con_items: List[Dict[str, Any]] = []
+        if isinstance(contradictions, list):
+            con_items = [c for c in contradictions if isinstance(c, dict)]
+        elif isinstance(contradictions, str) and contradictions.strip():
+            try:
+                loaded = json.loads(contradictions)
+                if isinstance(loaded, list):
+                    con_items = [c for c in loaded if isinstance(c, dict)]
+            except Exception:
+                pass
+
+        criteria_low = json.dumps(scope_criteria).lower() if isinstance(scope_criteria, dict) else str(scope_criteria).lower()
+        prefer_mini = "mini" in criteria_low and "major" not in criteria_low
+        prefer_major = "major" in criteria_low and "mini" not in criteria_low
+
+        # Parse effort weeks cap if available
+        weeks_cap = 8
+        prof_str = json.dumps(profile) if isinstance(profile, dict) else str(profile)
+        wk_match = re.search(r"available_weeks[\"':\s]+(\d+)", prof_str, re.I)
+        if wk_match:
+            weeks_cap = max(2, min(24, int(wk_match.group(1))))
+
+        options: List[TopicOptionItem] = []
+        n_label = max(1, int(n_papers or 0))
+
+        for g in gap_items:
+            arch = str(g.get("architecture", "Proposed Model")).strip()
+            ds = str(g.get("dataset", "Benchmark")).strip()
+            label = str(g.get("gap_label") or f"{arch} on {ds}")
+            ev_ids = [str(x) for x in (g.get("supporting_paper_ids") or g.get("evidence_ids") or []) if str(x).strip()]
+            if not ev_ids:
+                ev_ids = ["P-CORPUS"]
+
+            is_heavy = any(d in ds.lower() for d in cls.MAJOR_DATASETS) or any(m in arch.lower() for m in cls.HEAVY_MODELS)
+            scope: str = "major" if is_heavy else "mini"
+            if prefer_mini:
+                scope = "mini"
+            elif prefer_major:
+                scope = "major"
+
+            effort = min(weeks_cap, 4 if scope == "mini" else 10)
+            compute = (
+                "Laptop CPU or Colab Free (approx. 2-6 hours for 3 seeds)"
+                if scope == "mini"
+                else "Single 16GB+ GPU or Multi-GPU (approx. 15-35 GPU hours)"
+            )
+            options.append(
+                TopicOptionItem(
+                    title=f"Evaluate {label}",
+                    scope=scope,  # type: ignore
+                    reason=f"The pairing {label} was not found in the {n_label} papers searched and can be tested against reported baselines.",
+                    evidence_ids=ev_ids,
+                    datasets=[ds],
+                    compute_needed=compute,
+                    papers_to_read=ev_ids,
+                    risks=[
+                        f"External literature outside the {n_label} papers searched may cover this pairing.",
+                        "Split or hyperparameter mismatch with source papers can confound comparisons.",
+                    ],
+                    effort_weeks=max(1, effort),
+                )
+            )
+            if len(options) >= 5:
+                break
+
+        # Add contradiction-traceable option if room remains
+        for c in con_items:
+            if len(options) >= 5:
+                break
+            pa = str(c.get("paper_a") or c.get("paper_a_id") or "").strip()
+            pb = str(c.get("paper_b") or c.get("paper_b_id") or "").strip()
+            ds = str(c.get("dataset") or "Benchmark").strip()
+            ev_ids = [x for x in [pa, pb] if x] or ["P-CORPUS"]
+            scope = "mini" if prefer_mini or not any(d in ds.lower() for d in cls.MAJOR_DATASETS) else "major"
+            options.append(
+                TopicOptionItem(
+                    title=f"Controlled replication of {pa or 'Paper A'} vs {pb or 'Paper B'} on {ds}",
+                    scope=scope,  # type: ignore
+                    reason=f"Resolves conflicting results across {', '.join(ev_ids)} under a unified split; controlled comparison was not found in the {n_label} papers searched.",
+                    evidence_ids=ev_ids,
+                    datasets=[ds],
+                    compute_needed="Laptop CPU or Single GPU (approx. 3-8 hours)",
+                    papers_to_read=ev_ids,
+                    risks=["Original code or random seeds may differ from published summaries."],
+                    effort_weeks=max(1, min(weeks_cap, 4 if scope == "mini" else 8)),
+                )
+            )
+
+        warnings: List[str] = []
+        if len(options) < 3:
+            warnings.append(
+                f"Evidence is too thin for 3 options: only {len(options)} traceable gap/contradiction candidate(s) found in the {n_label} papers searched."
+            )
+
+        return TopicRecommendationOutput(options=options[:5], warnings=warnings)

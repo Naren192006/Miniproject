@@ -448,3 +448,54 @@ class TopicInterviewOutput(BaseModel):
             if not self.next_question or len(self.next_question.strip()) < 5:
                 raise ValueError("When 'ready' is false, 'next_question' must ask one short question.")
         return self
+
+
+# ==============================================================================
+# Prompt 11: Topic & Scope Recommender Models
+# ==============================================================================
+
+FORBIDDEN_TOPIC_WORDS = [
+    r"\bnovel\b",
+    r"\bfirst\b",
+    r"\bunexplored\b",
+    r"\bstate of the art\b",
+    r"\bstate-of-the-art\b",
+]
+
+
+class TopicOptionItem(BaseModel):
+    """Single recommended student project option from Prompt 11."""
+    title: str = Field(..., min_length=5)
+    scope: Literal["mini", "major"] = Field(...)
+    reason: str = Field(..., min_length=10)
+    evidence_ids: List[str] = Field(..., min_length=1)
+    datasets: List[str] = Field(..., min_length=1)
+    compute_needed: str = Field(..., min_length=3)
+    papers_to_read: List[str] = Field(..., min_length=1)
+    risks: List[str] = Field(..., min_length=1)
+    effort_weeks: int = Field(..., ge=1, le=52)
+
+    @model_validator(mode="after")
+    def validate_no_forbidden_words(self) -> "TopicOptionItem":
+        combined = " ".join([self.title, self.reason, *self.risks]).lower()
+        for pat in FORBIDDEN_TOPIC_WORDS:
+            if re.search(pat, combined):
+                raise ValueError(f"Rule violation: Never use forbidden wording matching '{pat}' in topic options.")
+        return self
+
+
+class TopicRecommendationOutput(BaseModel):
+    """Schema for Prompt 11: 11_topic_recommender.md"""
+    options: List[TopicOptionItem] = Field(default_factory=list, max_length=5)
+    warnings: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_recommendations(self) -> "TopicRecommendationOutput":
+        for w in self.warnings:
+            w_low = w.lower()
+            for pat in FORBIDDEN_TOPIC_WORDS:
+                if re.search(pat, w_low):
+                    raise ValueError(f"Rule violation: Never use forbidden wording matching '{pat}' in warnings.")
+        if len(self.options) < 3 and not self.warnings:
+            raise ValueError("Rule violation: If fewer than 3 options are returned, include a warning explaining why.")
+        return self

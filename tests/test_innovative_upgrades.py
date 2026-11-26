@@ -179,3 +179,41 @@ def test_prompt_10_topic_interviewer():
     r3 = runner.run_topic_interview(answers=full_answers, llm_fn=None)
     assert r3.data.ready is True
     assert r3.data.missing_fields == []
+
+
+def test_prompt_11_topic_recommender():
+    from hypothesisforge.prompt_engine.validator import ResponseValidator
+
+    runner = PromptRunner()
+    res = run_full_pipeline(get_sample_corpus(), llm_fn=None)
+    gaps = [
+        {
+            "gap_label": g["gap_label"],
+            "architecture": g["architecture"],
+            "dataset": g["dataset"],
+            "supporting_paper_ids": [p.paper_id for p in res.papers[:1]],
+        }
+        for g in res.candidate_gaps[:4]
+    ]
+    out = runner.run_topic_recommendation(
+        profile={"available_weeks": 6, "compute_access": "laptop", "project_level": "mini"},
+        gaps=gaps,
+        contradictions=[],
+        scope_criteria="mini",
+        n_papers=len(res.papers),
+        llm_fn=None,
+    )
+    assert 1 <= len(out.data.options) <= 5
+    for opt in out.data.options:
+        assert opt.scope == "mini"
+        assert f"not found in the {len(res.papers)} papers searched" in opt.reason.lower()
+        assert len(opt.evidence_ids) >= 1
+
+    # Validator rejects forbidden words like "novel" or "state of the art"
+    bad_json = (
+        '{"options":[{"title":"A novel study","scope":"mini","reason":"It is the first and unexplored.",'
+        '"evidence_ids":["P-1"],"datasets":["PACS"],"compute_needed":"Laptop","papers_to_read":["P-1"],'
+        '"risks":["Small data"],"effort_weeks":4}],"warnings":["Fewer than 3 options."]}'
+    )
+    val = ResponseValidator.validate_topic_recommendation(bad_json)
+    assert val.is_valid is False

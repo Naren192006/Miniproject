@@ -21,6 +21,7 @@ from .fallbacks import (
     RuleBasedEvidenceAnswerer,
     RuleBasedQueryRewriter,
     RuleBasedTopicInterviewer,
+    RuleBasedTopicRecommender,
 )
 from .models import (
     LiteratureExtractionOutput,
@@ -33,6 +34,7 @@ from .models import (
     EvidenceAnswerOutput,
     QueryRewriteOutput,
     TopicInterviewOutput,
+    TopicRecommendationOutput,
 )
 
 
@@ -687,6 +689,104 @@ class PromptRunner:
             )
 
         fallback_data = RuleBasedTopicInterviewer.interview(answers)
+        return PromptExecutionResult(
+            prompt_name=prompt_def.name,
+            prompt_version=prompt_def.version,
+            data=fallback_data,
+            raw_output=retry_reply,
+            retries_used=1,
+            used_fallback=True,
+            validation_error=retry_val.error_message or val.error_message,
+        )
+
+    def run_topic_recommendation(
+        self,
+        profile: Any,
+        gaps: Any,
+        contradictions: Any,
+        scope_criteria: Any,
+        n_papers: int,
+        allowed_paper_ids: Optional[list] = None,
+        allowed_datasets: Optional[list] = None,
+        llm_fn: Optional[LLMCallable] = None,
+    ) -> PromptExecutionResult:
+        """Runs Prompt 11: 11_topic_recommender.md"""
+        import json as _json
+
+        prompt_def = self.loader.load_prompt("11_topic_recommender")
+        profile_str = _json.dumps(profile, ensure_ascii=False) if isinstance(profile, dict) else str(profile)
+        gaps_str = _json.dumps(gaps, ensure_ascii=False) if isinstance(gaps, (list, dict)) else str(gaps)
+        con_str = _json.dumps(contradictions, ensure_ascii=False) if isinstance(contradictions, (list, dict)) else str(contradictions)
+        scope_str = _json.dumps(scope_criteria, ensure_ascii=False) if isinstance(scope_criteria, dict) else str(scope_criteria)
+
+        user_prompt = prompt_def.render_user_prompt(
+            profile=profile_str,
+            gaps=gaps_str,
+            contradictions=con_str,
+            scope_criteria=scope_str,
+            n=str(n_papers),
+        )
+
+        if llm_fn is None:
+            fallback_data = RuleBasedTopicRecommender.recommend(
+                gaps=gaps,
+                contradictions=contradictions,
+                profile=profile,
+                scope_criteria=scope_criteria,
+                n_papers=n_papers,
+            )
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version="not used",
+                data=fallback_data,
+                raw_output="[No LLM configured - Rule-based topic recommender executed]",
+                retries_used=0,
+                used_fallback=True,
+                prompt_used=False,
+            )
+
+        raw_reply = llm_fn(prompt_def.system_prompt, user_prompt)
+        val = ResponseValidator.validate_topic_recommendation(
+            raw_reply,
+            allowed_paper_ids=allowed_paper_ids,
+            allowed_datasets=allowed_datasets,
+        )
+
+        if val.is_valid and val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=val.data,
+                raw_output=raw_reply,
+                retries_used=0,
+                used_fallback=False,
+            )
+
+        retry_prompt = f"{user_prompt}\n\nIMPORTANT CORRECTION: {val.retry_prompt}"
+        retry_reply = llm_fn(prompt_def.system_prompt, retry_prompt)
+        retry_val = ResponseValidator.validate_topic_recommendation(
+            retry_reply,
+            allowed_paper_ids=allowed_paper_ids,
+            allowed_datasets=allowed_datasets,
+        )
+
+        if retry_val.is_valid and retry_val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=retry_val.data,
+                raw_output=retry_reply,
+                retries_used=1,
+                used_fallback=False,
+            )
+
+        fallback_data = RuleBasedTopicRecommender.recommend(
+            gaps=gaps,
+            contradictions=contradictions,
+            profile=profile,
+            scope_criteria=scope_criteria,
+            n_papers=n_papers,
+        )
         return PromptExecutionResult(
             prompt_name=prompt_def.name,
             prompt_version=prompt_def.version,

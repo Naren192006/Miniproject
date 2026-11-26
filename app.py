@@ -1068,35 +1068,75 @@ with tabs[6]:
     with sc3:
         timeline_weeks = st.slider("Available Timeline (weeks)", min_value=2, max_value=16, value=default_weeks)
 
-    interview = ScopeInterview(
-        timeline_weeks=timeline_weeks,
-        compute_budget=compute_budget,
-        goal=target_scope,
-    )
-    recs = recommend_scoped_topics(
-        interview=interview,
-        result=result,
-        max_options=5,
-    )
+    # Prepare grounded inputs for Prompt 11 (Topic & Scope Recommender)
+    enriched_gaps = []
+    for g in result.candidate_gaps:
+        arch_l = g["architecture"].lower()
+        ds_l = g["dataset"].lower()
+        sup_ids = [
+            pid for pid, rec in result.literature_records.items()
+            if any(arch_l in a.lower() or a.lower() in arch_l for a in rec.architectures)
+            or ds_l in [d.lower() for d in rec.datasets]
+        ] or [p.paper_id for p in result.papers[:1]]
+        enriched_gaps.append({
+            "gap_label": g["gap_label"],
+            "architecture": g["architecture"],
+            "dataset": g["dataset"],
+            "status": g.get("status", "not_found_in_corpus"),
+            "supporting_paper_ids": sup_ids,
+        })
 
-    if not recs:
-        st.info("No candidate gaps in the current corpus to scope. Search a topic or upload papers with explicit models and datasets.")
+    con_inputs = [
+        {
+            "paper_a": c.paper_a_id,
+            "paper_b": c.paper_b_id,
+            "dataset": c.dataset,
+            "classification": c.classification,
+            "explanation": c.explanation,
+        }
+        for c in result.contradictions
+    ]
+    scope_criteria_str = f"target_scale={target_scope}, compute_budget={compute_budget}, available_weeks={timeline_weeks}"
+    allowed_pids = [p.paper_id for p in result.papers]
+    allowed_ds = sorted({d for rec in result.literature_records.values() for d in rec.datasets})
+
+    rec_exec = PromptRunner().run_topic_recommendation(
+        profile=ans_dict or {"available_weeks": timeline_weeks, "compute_access": compute_budget, "project_level": target_scope},
+        gaps=enriched_gaps,
+        contradictions=con_inputs,
+        scope_criteria=scope_criteria_str,
+        n_papers=len(result.papers),
+        allowed_paper_ids=allowed_pids,
+        allowed_datasets=allowed_ds,
+        llm_fn=llm_fn,
+    )
+    topic_out = rec_exec.data
+
+    if topic_out.warnings:
+        for w in topic_out.warnings:
+            st.warning(w)
+
+    if not topic_out.options:
+        st.info("No candidate gaps or contradictions in the current corpus to scope. Search a topic or upload papers with explicit models and datasets.")
     else:
-        for idx, rec in enumerate(recs, start=1):
-            scope_variant = "green" if rec.scope_label == "mini" else "blue"
-            mot_html = "".join(f"<li>{esc(m)}</li>" for m in rec.motivating_papers)
-            risk_html = "".join(f"<li>{esc(r)}</li>" for r in rec.risks)
+        for idx, opt in enumerate(topic_out.options, start=1):
+            scope_variant = "green" if opt.scope == "mini" else "blue"
+            ev_html = ", ".join(esc(e) for e in opt.evidence_ids)
+            read_html = ", ".join(esc(p) for p in opt.papers_to_read)
+            ds_html = ", ".join(esc(d) for d in opt.datasets)
+            risk_html = "".join(f"<li>{esc(r)}</li>" for r in opt.risks)
             st.markdown(
                 f"""<div class="hf-card">
-                    <div class="hf-card-title">Option {idx}: {esc(rec.gap_label)}</div>
+                    <div class="hf-card-title">Option {idx}: {esc(opt.title)}</div>
                     <div style="margin-bottom:0.55rem;">
-                        {pill(rec.scope_label.upper(), scope_variant)}
-                        {pill(rec.fit_reason, "slate")}
+                        {pill(opt.scope.upper(), scope_variant)}
+                        {pill(f"{opt.effort_weeks} weeks", "slate")}
+                        {pill(f"Datasets: {ds_html}", "slate")}
                     </div>
-                    <div style="font-size:0.88rem; color:#334155;"><strong>Required Compute:</strong> {esc(rec.required_compute)}</div>
-                    <div style="font-size:0.84rem; font-weight:600; color:#475569; margin-top:0.45rem;">Motivating Papers:</div>
-                    <ul style="margin:0.2rem 0 0.35rem 1.2rem; color:#334155; font-size:0.86rem;">{mot_html}</ul>
-                    <div style="font-size:0.84rem; font-weight:600; color:#475569;">Risks to Check:</div>
+                    <div style="font-size:0.9rem; color:#1e293b; margin-bottom:0.4rem;">{esc(opt.reason)}</div>
+                    <div style="font-size:0.86rem; color:#334155;"><strong>Compute Needed:</strong> {esc(opt.compute_needed)}</div>
+                    <div style="font-size:0.86rem; color:#334155;"><strong>Traceable Evidence IDs:</strong> {ev_html} | <strong>Papers to Read:</strong> {read_html}</div>
+                    <div style="font-size:0.84rem; font-weight:600; color:#475569; margin-top:0.45rem;">Risks to Check:</div>
                     <ul style="margin:0.2rem 0 0 1.2rem; color:#334155; font-size:0.86rem;">{risk_html}</ul>
                 </div>""",
                 unsafe_allow_html=True,
