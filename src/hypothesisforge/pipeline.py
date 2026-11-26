@@ -454,45 +454,61 @@ def answer_workspace_question(
     question: str,
     result: AnalysisPipelineResult,
     llm_fn: Optional[LLMCallable] = None,
+    chat_history: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[str, str, str]:
     """
-    Answers user questions in Ask the Papers:
-    - If asking about discovered gaps, hypotheses, contradictions, or how to build an experiment,
-      answers directly from the pipeline's structured findings and experiment plans.
-    - Otherwise, retrieves relevant passages from the papers and runs Prompt 08.
+    Answers user questions in Ask the Papers using Prompt 09 (Query Rewriter & Intent Router)
+    followed by either structured analysis routing or Prompt 08 passage Q&A.
     Returns (answer_text, retrieved_passages_text, mode_note).
     """
-    q_low = question.lower()
-    is_meta_query = any(
-        kw in q_low for kw in [
-            "gap", "gaps", "experiment", "hypothesis", "hypotheses",
-            "contradiction", "contradictions", "next step", "what should i",
-        ]
-    )
+    runner = PromptRunner()
+    history_str = ""
+    if chat_history:
+        recent = chat_history[-4:]
+        history_str = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')[:160]}" for m in recent)
 
-    if is_meta_query:
+    rewrite_res = runner.run_query_rewrite(history=history_str, question=question, llm_fn=llm_fn)
+    rw = rewrite_res.data
+    standalone_q = rw.standalone_question
+    intent = rw.intent
+    q_low = standalone_q.lower()
+
+    if intent == "out_of_scope":
+        return (
+            "The passages do not answer this question. It appears outside the scope of the loaded research papers.",
+            "",
+            f"Intent: out_of_scope · Rewritten: \"{standalone_q}\"",
+        )
+
+    if intent == "summary":
+        summary_text = result.report_summary.text if result.report_summary else "No summary available yet."
+        return summary_text, "", f"Intent: summary · Rewritten: \"{standalone_q}\""
+
+    if intent in {"gap", "contradiction", "compare", "topic_advice"} or any(
+        kw in q_low for kw in ["hypothesis", "hypotheses", "critic", "experiment"]
+    ):
         if not result.candidate_gaps and not result.experiment_plans and not result.contradictions:
             return (
                 "No candidate gaps, contradictions, or experiment plans were generated for the current corpus yet. "
                 "Try searching a broader topic or uploading papers with explicit models and benchmarks.",
                 "",
-                "Analysis Summary (No LLM)",
+                f"Intent: {intent} (No data)",
             )
 
         wants_simple = any(w in q_low for w in ["simple", "understand", "explain", "easy", "plain", "beginner"])
         wants_build = any(w in q_low for w in ["build", "experiment", "steps", "run", "implement", "how do i"])
-        wants_contradictions = any(w in q_low for w in ["contradiction", "disagree", "conflict"])
         wants_hypotheses = any(w in q_low for w in ["hypothesis", "hypotheses", "critic"])
 
         lines: List[str] = []
 
-        if wants_contradictions:
+        if intent == "contradiction" or intent == "compare":
             if not result.contradictions:
                 lines.append("No cross-paper contradictions could be checked yet because fewer than two papers reported comparable numeric metrics.")
             else:
                 lines.append(f"Checked {len(result.contradictions)} cross-paper result pairs:")
                 for pair_title, cj in result.contradictions[:4]:
-                    lines.append(f"- **{pair_title}** ({cj.classification}): {cj.explanation}")
+                    factors_txt = f" [factors: {', '.join(cj.conflict_factors)}]" if getattr(cj, "conflict_factors", None) else ""
+                    lines.append(f"- **{pair_title}** ({cj.classification}{factors_txt}): {cj.explanation}")
         elif wants_hypotheses:
             if not result.hypotheses:
                 lines.append("No hypotheses were generated from the current corpus.")
@@ -500,8 +516,11 @@ def answer_workspace_question(
                 lines.append(f"Generated {len(result.hypotheses)} testable hypotheses:")
                 for idx, (gap_label, hyp) in enumerate(result.hypotheses[:4], start=1):
                     lines.append(f"- **H{idx} ({gap_label}):** {hyp.statement or hyp.reason}")
+        elif intent == "topic_advice":
+            lines.append("**Recommended options from the Gap Matrix (see Scope Advisor tab for full filtering):**")
+            for g in result.candidate_gaps[:4]:
+                lines.append(f"- **{g['gap_label']}** — derived directly from corpus records.")
         elif wants_simple and wants_build:
-            # Simple explanation of gaps + how to build
             if result.candidate_gaps:
                 top_gap = result.candidate_gaps[0]
                 lines.append(
@@ -516,7 +535,6 @@ def answer_workspace_question(
                     f"Run each setup 3 times with different random seeds so the comparison is fair."
                 )
         elif wants_simple:
-            # Simple explanation of the gaps only
             if result.candidate_gaps:
                 lines.append("**Here is what the gaps mean in plain English:**")
                 for g in result.candidate_gaps[:4]:
@@ -540,7 +558,6 @@ def answer_workspace_question(
                     f"- Steps: {steps_preview}"
                 )
         else:
-            # General overview of candidate gaps ("tell me about the gaps")
             if result.gap_assessments:
                 lines.append(f"**Found {len(result.candidate_gaps)} candidate gaps in this corpus:**")
                 for gap_label, assessment in result.gap_assessments[:4]:
@@ -548,20 +565,23 @@ def answer_workspace_question(
             elif result.candidate_gaps:
                 lines.append(f"Candidate gaps found: {', '.join(g['gap_label'] for g in result.candidate_gaps[:4])}.")
 
-        passages_str, _ = retrieve_passages(question, result.all_chunks, top_k=3)
-        return "\n\n".join(lines), passages_str, "Grounded in Analysis Results"
+        passages_str, _ = retrieve_passages(standalone_q, result.all_chunks, top_k=3)
+        return "\n\n".join(lines), passages_str, f"Grounded in Analysis Results · Intent: {intent}"
 
-    # Standard paper-passage Q&A via Prompt 08
-    passages_str, _ = retrieve_passages(question, result.all_chunks, top_k=5)
-    runner = PromptRunner()
+    # Factual Q&A across sub-queries via Prompt 08
+    combined_query = " ".join(rw.sub_queries)
+    passages_str, _ = retrieve_passages(combined_query, result.all_chunks, top_k=5)
     ans_res = runner.run_evidence_answer(
-        question=question,
+        question=standalone_q,
         passages=passages_str,
         llm_fn=llm_fn,
     )
     ans_text = ans_res.data.text if hasattr(ans_res.data, "text") else str(ans_res.data)
+    if rw.needs_external_search:
+        ans_text += "\n\n*Note: External search (arXiv/OpenAlex) may be needed if this topic goes beyond the loaded papers.*"
+
     if ans_res.prompt_used:
-        mode_note = f"Prompt v{ans_res.prompt_version} · {'Rule-Based Fallback' if ans_res.used_fallback else 'Validated LLM'}"
+        mode_note = f"Prompt v{ans_res.prompt_version} · Intent: {intent} · {'Rule-Based Fallback' if ans_res.used_fallback else 'Validated LLM'}"
     else:
-        mode_note = "Rule-Based (No LLM)"
+        mode_note = f"Rule-Based (No LLM) · Intent: {intent}"
     return ans_text, passages_str, mode_note

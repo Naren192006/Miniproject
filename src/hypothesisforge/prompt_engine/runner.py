@@ -19,6 +19,7 @@ from .fallbacks import (
     RuleBasedExperimentDesigner,
     RuleBasedReportSummarizer,
     RuleBasedEvidenceAnswerer,
+    RuleBasedQueryRewriter,
 )
 from .models import (
     LiteratureExtractionOutput,
@@ -29,6 +30,7 @@ from .models import (
     ExperimentDesignOutput,
     ReportSummaryOutput,
     EvidenceAnswerOutput,
+    QueryRewriteOutput,
 )
 
 
@@ -569,4 +571,64 @@ class PromptRunner:
             retries_used=1,
             used_fallback=True,
             validation_error=retry_val.error_message or val.error_message
+        )
+
+    def run_query_rewrite(
+        self,
+        history: str,
+        question: str,
+        llm_fn: Optional[LLMCallable] = None,
+    ) -> PromptExecutionResult:
+        """Runs Prompt 09: 09_query_rewriter.md"""
+        prompt_def = self.loader.load_prompt("09_query_rewriter")
+        user_prompt = prompt_def.render_user_prompt(history=history or "None", question=question)
+
+        if llm_fn is None:
+            fallback_data = RuleBasedQueryRewriter.rewrite(history, question)
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version="not used",
+                data=fallback_data,
+                raw_output="[No LLM configured - Rule-based query rewriter executed]",
+                retries_used=0,
+                used_fallback=True,
+                prompt_used=False,
+            )
+
+        raw_reply = llm_fn(prompt_def.system_prompt, user_prompt)
+        val = ResponseValidator.validate_query_rewrite(raw_reply)
+
+        if val.is_valid and val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=val.data,
+                raw_output=raw_reply,
+                retries_used=0,
+                used_fallback=False,
+            )
+
+        retry_prompt = f"{user_prompt}\n\nIMPORTANT CORRECTION: {val.retry_prompt}"
+        retry_reply = llm_fn(prompt_def.system_prompt, retry_prompt)
+        retry_val = ResponseValidator.validate_query_rewrite(retry_reply)
+
+        if retry_val.is_valid and retry_val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=retry_val.data,
+                raw_output=retry_reply,
+                retries_used=1,
+                used_fallback=False,
+            )
+
+        fallback_data = RuleBasedQueryRewriter.rewrite(history, question)
+        return PromptExecutionResult(
+            prompt_name=prompt_def.name,
+            prompt_version=prompt_def.version,
+            data=fallback_data,
+            raw_output=retry_reply,
+            retries_used=1,
+            used_fallback=True,
+            validation_error=retry_val.error_message or val.error_message,
         )

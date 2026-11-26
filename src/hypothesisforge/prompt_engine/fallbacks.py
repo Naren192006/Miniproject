@@ -17,6 +17,7 @@ from .models import (
     ExperimentDesignOutput,
     ReportSummaryOutput,
     EvidenceAnswerOutput,
+    QueryRewriteOutput,
     count_words,
 )
 
@@ -133,16 +134,15 @@ class RuleBasedLiteratureExtractor:
                 if not metric_match:
                     continue
 
-                # Require a numeric value (either % or decimal/number paired with metric) in the same sentence
-                num_match = re.search(r"\b(\d{1,4}(?:\.\d{1,3})?)\s*%", sent_clean)
+                # Prefer numeric value directly following a result verb or metric name in the same sentence
+                metric_esc = re.escape(metric_match)
+                num_match = re.search(
+                    rf"(?:achieves|reaches|obtains|attains|reports|scores|yields|reduces|improves|{metric_esc})\s+(?:of\s+|by\s+|is\s+)?(\d{{1,4}}(?:\.\d{{1,3}})?)\s*%?",
+                    sent_clean,
+                    re.I,
+                )
                 if not num_match:
-                    # Also match decimal or score numbers near the metric/result verb (e.g., "RMSE of 1.45", "AUC of 0.94")
-                    metric_esc = re.escape(metric_match)
-                    num_match = re.search(
-                        rf"(?:{metric_esc}|achieves|reaches|obtains|reduces|improves|of|by)\s+(\d+(?:\.\d+)?)\b",
-                        sent_clean,
-                        re.I,
-                    )
+                    num_match = re.search(r"\b(\d{1,4}(?:\.\d{1,3})?)\s*%", sent_clean)
                 if not num_match:
                     continue
                 val = float(num_match.group(1))
@@ -248,13 +248,32 @@ class RuleBasedContradictionEvaluator:
 
         papers = re.findall(r"-\s*Paper:\s*([^\n]+)", pair_text)
         datasets = re.findall(r"-\s*Dataset:\s*([^\n]+)", pair_text)
+        metrics = re.findall(r"-\s*Metric:\s*([^\n]+)", pair_text)
+        settings = re.findall(r"-\s*Setting:\s*([^\n]+)", pair_text)
         values = re.findall(r"-\s*Value:\s*([^\n]+)", pair_text)
         p_a = papers[0].strip() if len(papers) > 0 else "Paper A"
         p_b = papers[1].strip() if len(papers) > 1 else "Paper B"
         d_a = datasets[0].strip() if len(datasets) > 0 else "not stated"
         d_b = datasets[1].strip() if len(datasets) > 1 else "not stated"
+        m_a = metrics[0].strip() if len(metrics) > 0 else "not stated"
+        m_b = metrics[1].strip() if len(metrics) > 1 else "not stated"
+        s_a = settings[0].strip() if len(settings) > 0 else "not stated"
+        s_b = settings[1].strip() if len(settings) > 1 else "not stated"
         v_a = values[0].strip() if len(values) > 0 else "a reported value"
         v_b = values[1].strip() if len(values) > 1 else "a reported value"
+
+        factors: List[str] = []
+        if d_a.lower() != d_b.lower():
+            factors.append("dataset")
+        if m_a.lower() != m_b.lower():
+            factors.append("metric")
+        if s_a.lower() != s_b.lower():
+            factors.append("hyperparameters")
+        if "protocol: not stated" in pair_lower or "split: not stated" in pair_lower:
+            factors.extend(["split", "seed"])
+        if not factors:
+            factors.append("seed")
+        factors = list(dict.fromkeys(factors))
 
         known_found = [d for d in KNOWN_DATASETS if d.lower() in pair_lower]
         if len(set(known_found)) > 1 or (
@@ -264,6 +283,7 @@ class RuleBasedContradictionEvaluator:
             and "unknown" not in d_b.lower()
             and "not stated" not in d_b.lower()
         ):
+            conf = 0.88 if ("protocol: not stated" not in pair_lower) else 0.78
             return ContradictionJudgementOutput(
                 classification="non-comparable evidence",
                 explanation=(
@@ -276,6 +296,8 @@ class RuleBasedContradictionEvaluator:
                     "Confirm whether both papers used the same data splits and preprocessing",
                     "Verify if the same model architecture and training budget were used",
                 ],
+                confidence_score=conf,
+                conflict_factors=factors,
             )
 
         if (
@@ -298,6 +320,8 @@ class RuleBasedContradictionEvaluator:
                     "Verify how many random runs/seeds were averaged",
                     "Confirm that both papers measure the exact same metric definition",
                 ],
+                confidence_score=0.45,
+                conflict_factors=factors,
             )
 
         return ContradictionJudgementOutput(
@@ -310,6 +334,8 @@ class RuleBasedContradictionEvaluator:
                 "Confirm seed count and variance reporting",
                 "Verify optimizer tuning budget",
             ],
+            confidence_score=0.72,
+            conflict_factors=factors,
         )
 
 
@@ -630,4 +656,58 @@ class RuleBasedEvidenceAnswerer:
             paragraphs=[ans_text],
             citations=cited_nums,
             is_declined=False,
+        )
+
+
+class RuleBasedQueryRewriter:
+    """Deterministic fallback for Prompt 09 (Query Rewriter & Intent Router)."""
+
+    @classmethod
+    def rewrite(cls, history: str, question: str) -> QueryRewriteOutput:
+        q_clean = question.strip()
+        q_low = q_clean.lower()
+
+        # Resolve simple pronouns ("it", "that dataset", "that model") from chat history
+        standalone = q_clean
+        if history.strip() and re.search(r"\b(it|that dataset|that model|that paper|those)\b", q_low):
+            hist_entities = (
+                re.findall(r"\b(" + "|".join(re.escape(x) for x in KNOWN_DATASETS + KNOWN_ARCHITECTURES) + r")\b", history, re.I)
+            )
+            if hist_entities:
+                last_entity = hist_entities[-1]
+                standalone = re.sub(r"\b(that dataset|that model|it)\b", last_entity, standalone, count=1, flags=re.I)
+
+        # Classify intent
+        if any(k in q_low for k in ["contradict", "disagree", "conflict"]):
+            intent = "contradiction"
+        elif any(k in q_low for k in ["scope", "mini", "major", "topic_advice", "which topic", "recommend a topic"]):
+            intent = "topic_advice"
+        elif any(k in q_low for k in ["gap", "gaps", "untested", "missing combination", "build"]):
+            # Note: "build a rocket" without corpus keywords is out_of_scope
+            if "rocket" in q_low or ("build" in q_low and not any(w in q_low for w in ["gap", "gaps", "experiment", "model", "dataset"])):
+                intent = "out_of_scope"
+            else:
+                intent = "gap"
+        elif any(k in q_low for k in ["compare", "versus", " vs ", "difference between"]):
+            intent = "compare"
+        elif any(k in q_low for k in ["summary", "summarize", "overview"]):
+            intent = "summary"
+        elif any(k in q_low for k in ["weather", "capital of", "recipe", "rocket"]):
+            intent = "out_of_scope"
+        else:
+            intent = "factual_qa"
+
+        # Split multi-part questions into up to 3 sub-queries
+        raw_parts = [p.strip() for p in re.split(r"[?;]|\band\b", standalone) if len(p.strip()) >= 5]
+        sub_queries = raw_parts[:3] if raw_parts else [standalone]
+
+        needs_external = intent == "out_of_scope" or any(
+            k in q_low for k in ["outside", "external", "search arxiv", "search openalex"]
+        )
+
+        return QueryRewriteOutput(
+            standalone_question=standalone,
+            intent=intent,  # type: ignore
+            sub_queries=sub_queries,
+            needs_external_search=needs_external,
         )

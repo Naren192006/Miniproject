@@ -18,6 +18,7 @@ from .models import (
     ExperimentDesignOutput,
     ReportSummaryOutput,
     EvidenceAnswerOutput,
+    QueryRewriteOutput,
     count_words,
 )
 
@@ -382,6 +383,31 @@ class ResponseValidator:
         return ValidationResult(is_valid=True, data=output, raw_text=text)
 
     @classmethod
+    def validate_query_rewrite(cls, raw_text: str) -> ValidationResult:
+        """Validates Prompt 09 (09_query_rewriter.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the required keys.",
+            )
+
+        try:
+            output = QueryRewriteOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nReturn valid JSON with at most 3 sub_queries.",
+            )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
     def validate_evidence_answer(cls, raw_text: str, passages: Optional[str] = None) -> ValidationResult:
         """
         Validates Prompt 08 (08_evidence_answer.md) output.
@@ -424,3 +450,28 @@ class ResponseValidator:
                 )
 
         return ValidationResult(is_valid=True, data=output, raw_text=text)
+
+    @classmethod
+    def validate_query_rewrite(cls, raw_text: str) -> ValidationResult:
+        """Validates Prompt 09 (09_query_rewriter.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the required keys.",
+            )
+
+        try:
+            output = QueryRewriteOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nReturn valid JSON with at most 3 sub_queries.",
+            )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

@@ -195,6 +195,8 @@ class ContradictionJudgementOutput(BaseModel):
     ] = Field(...)
     explanation: str = Field(..., min_length=15)
     conditions_to_verify: List[str] = Field(default_factory=list, max_length=4)
+    confidence_score: float = Field(default=0.75, ge=0.0, le=1.0)
+    conflict_factors: List[str] = Field(default_factory=list)
 
     @field_validator("explanation")
     @classmethod
@@ -403,3 +405,23 @@ class EvidenceAnswerOutput(BaseModel):
             raise ValueError("Rule violation: Cite every claim with a passage number in square brackets (e.g. [1]).")
 
         return self
+
+
+# ==============================================================================
+# Prompt 09: Query Rewriter & Intent Router Models
+# ==============================================================================
+
+class QueryRewriteOutput(BaseModel):
+    """Schema for Prompt 09: 09_query_rewriter.md"""
+    standalone_question: str = Field(..., min_length=3, description="Self-contained rewritten question")
+    intent: Literal[
+        "summary",
+        "compare",
+        "gap",
+        "contradiction",
+        "topic_advice",
+        "factual_qa",
+        "out_of_scope",
+    ] = Field(..., description="Classified user intent")
+    sub_queries: List[str] = Field(..., min_length=1, max_length=3, description="At most 3 sub-queries")
+    needs_external_search: bool = Field(default=False, description="True only if corpus unlikely to contain answer")

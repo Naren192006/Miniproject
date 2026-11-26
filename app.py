@@ -20,7 +20,10 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from hypothesisforge.experiment_runner import execute_experiment_plan, generate_experiment_script
+from hypothesisforge.grounding_benchmark import run_full_evaluation_harness
 from hypothesisforge.ingestion import PaperDocument, extract_pdf_bytes
+from hypothesisforge.scope_advisor import ScopeInterview, recommend_scoped_topics
 from hypothesisforge.llm_client import get_llm_callable_from_env
 from hypothesisforge.paper_search import discover_papers, fetch_paper_documents
 from hypothesisforge.pipeline import (
@@ -374,6 +377,10 @@ if "analysis_result" not in st.session_state:
     )
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "experiment_runs" not in st.session_state:
+    st.session_state.experiment_runs = {}
+if "benchmark_rows" not in st.session_state:
+    st.session_state.benchmark_rows = None
 
 
 # ==============================================================================
@@ -544,6 +551,7 @@ tabs = st.tabs([
     "Contradictions",
     "Hypotheses & Critic",
     "Experiments & Graph",
+    "Scope Advisor",
     "Ask the Papers",
 ])
 
@@ -583,6 +591,32 @@ with tabs[0]:
             for a in result.audit_log
         ]
         st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
+
+    with st.expander("Evaluation Harness (16-Paper Benchmark, Gap & Contradiction Precision, Ablation)", expanded=False):
+        st.caption("Measures extraction precision, unsupported-claim rate, quote pass rate, gap precision, and contradiction precision.")
+        if st.button("Run Full Evaluation Harness", key="run_bench_btn"):
+            harness_report = run_full_evaluation_harness()
+            st.session_state.benchmark_rows = {
+                "table": [
+                    {
+                        "System": m.system_name,
+                        "Extracted": m.total_extracted,
+                        "Precision (%)": m.precision,
+                        "Recall (%)": m.recall,
+                        "Unsupported Claim Rate (%)": m.unsupported_claim_rate,
+                        "Quote Pass Rate (%)": m.quote_pass_rate,
+                    }
+                    for m in harness_report.extraction_rows
+                ],
+                "gap_precision": harness_report.gap_precision,
+                "contradiction_precision": harness_report.contradiction_precision,
+            }
+        if st.session_state.benchmark_rows:
+            bdata = st.session_state.benchmark_rows
+            bc1, bc2 = st.columns(2)
+            bc1.metric("Gap Matrix Precision", f"{bdata['gap_precision']:.1f}%")
+            bc2.metric("Contradiction Precision", f"{bdata['contradiction_precision']:.1f}%")
+            st.dataframe(pd.DataFrame(bdata["table"]), use_container_width=True, hide_index=True)
 
     export_payload = {
         "report_summary": result.report_summary.model_dump() if result.report_summary else None,
@@ -693,6 +727,43 @@ with tabs[2]:
     if result.matrix_rows:
         st.dataframe(pd.DataFrame(result.matrix_rows), use_container_width=True, hide_index=True)
 
+    st.subheader("Topic & Scope Advisor")
+    st.caption("Short scope interview: recommends 3–5 mini or major options grounded strictly in the Gap Matrix above.")
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    with sc1:
+        team_size = st.number_input("Team Size", min_value=1, max_value=6, value=2)
+    with sc2:
+        timeline_weeks = st.slider("Timeline (weeks)", min_value=2, max_value=16, value=6)
+    with sc3:
+        compute_budget = st.selectbox("Compute Budget", ["CPU / Colab Free", "Single GPU", "Multi-GPU"])
+    with sc4:
+        goal_scope = st.selectbox("Target Scope", ["Mini Project", "Major Project", "Any"])
+
+    interview = ScopeInterview(
+        team_size=int(team_size),
+        timeline_weeks=int(timeline_weeks),
+        compute_budget=compute_budget,
+        goal=goal_scope,
+    )
+    scoped_recs = recommend_scoped_topics(interview, result, max_options=5)
+    if not scoped_recs:
+        st.info("No candidate gaps in the matrix yet to scope.")
+    for rec_item in scoped_recs:
+        scope_variant = "green" if rec_item.scope_label == "mini" else "blue"
+        paper_pills = "".join(pill(pid, "slate") for pid in rec_item.motivating_papers)
+        risk_items = "".join(f"<li>{esc(rk)}</li>" for rk in rec_item.risks)
+        st.markdown(
+            f"""<div class="hf-card">
+                <div class="hf-card-title">{esc(rec_item.gap_label)} {pill(rec_item.scope_label.upper(), scope_variant)}</div>
+                <div style="margin-bottom:0.45rem;"><strong>Motivating Papers:</strong> {paper_pills}</div>
+                <div style="font-size:0.88rem; color:#334155;"><strong>Required Compute:</strong> {esc(rec_item.required_compute)}</div>
+                <div style="font-size:0.88rem; color:#334155; margin-top:0.25rem;"><strong>Fit:</strong> {esc(rec_item.fit_reason)}</div>
+                <div style="font-size:0.82rem; font-weight:600; color:#475569; margin-top:0.4rem;">Risks:</div>
+                <ul style="margin:0.2rem 0 0 1.2rem; color:#334155; font-size:0.85rem;">{risk_items}</ul>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
     st.subheader("Why These Candidate Gaps Matter")
     st.caption("Plain-language assessment of each untested model-and-dataset combination found in this set of papers.")
 
@@ -710,6 +781,44 @@ with tabs[2]:
                 <p style="margin-bottom:0.5rem; color:#334155;">{esc(assessment.reason)}</p>
                 <div style="font-size:0.85rem; font-weight:600; color:#475569;">Questions to Check:</div>
                 <ul style="margin:0.25rem 0 0 1.2rem; color:#334155; font-size:0.88rem;">{qs_html}</ul>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+    st.subheader("Topic & Scope Advisor")
+    st.caption("Short scope interview — recommends 3–5 mini or major options grounded directly in the Gap Matrix above.")
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        target_scope = st.selectbox("Target Project Scale", ["Both", "Mini Project", "Major Thesis"], key="scope_scale")
+    with sc2:
+        compute_budget = st.selectbox("Available Compute", ["Single GPU", "CPU only", "Multi-GPU"], key="scope_compute")
+    with sc3:
+        timeframe = st.selectbox("Timeframe", ["1-2 months", "1-2 weeks", "Semester"], key="scope_time")
+
+    scoped_options = recommend_scoped_topics(
+        result,
+        target_scope=target_scope,
+        compute_budget=compute_budget,
+        timeframe=timeframe,
+        max_options=5,
+    )
+    if not scoped_options:
+        st.info("No candidate gaps available yet to recommend scoped topics.")
+    for opt in scoped_options:
+        scope_variant = "blue" if opt.scope_label == "mini" else "amber"
+        mot_html = "".join(f"<li>{esc(m)}</li>" for m in opt.motivating_papers)
+        risk_html = "".join(f"<li>{esc(r)}</li>" for r in opt.risks)
+        st.markdown(
+            f"""<div class="hf-card">
+                <div class="hf-card-title">{esc(opt.option_title)} {pill(opt.scope_label.upper(), scope_variant)}</div>
+                <div style="font-size:0.86rem; color:#475569; margin-bottom:0.45rem;">
+                    <strong>Fit:</strong> {esc(opt.fit_reason)} · <strong>Compute:</strong> {esc(opt.required_compute)}
+                </div>
+                <div style="font-size:0.83rem; font-weight:600; color:#475569;">Motivating Papers:</div>
+                <ul style="margin:0.15rem 0 0.4rem 1.2rem; font-size:0.85rem; color:#334155;">{mot_html}</ul>
+                <div style="font-size:0.83rem; font-weight:600; color:#475569;">Risks:</div>
+                <ul style="margin:0.15rem 0 0 1.2rem; font-size:0.85rem; color:#334155;">{risk_html}</ul>
             </div>""",
             unsafe_allow_html=True,
         )
@@ -734,10 +843,17 @@ with tabs[3]:
         st.info("Need at least two papers with numeric results to compare pairs.")
     for pair_title, cj in result.contradictions:
         cond_html = "".join(f"<li>{esc(c)}</li>" for c in cj.conditions_to_verify)
+        conf_pct = int(round(cj.confidence_score * 100))
+        conf_variant = "green" if conf_pct >= 75 else ("amber" if conf_pct >= 50 else "red")
+        factor_pills = "".join(pill(f"Factor: {f}", "blue") for f in cj.conflict_factors)
         st.markdown(
             f"""<div class="hf-card">
                 <div class="hf-card-title">{esc(pair_title)}</div>
-                <div style="margin-bottom:0.55rem;">{verdict_pill(cj.classification)}</div>
+                <div style="margin-bottom:0.55rem;">
+                    {verdict_pill(cj.classification)}
+                    {pill(f"Confidence: {conf_pct}%", conf_variant)}
+                    {factor_pills}
+                </div>
                 <p style="margin-bottom:0.5rem; color:#334155;">{esc(cj.explanation)}</p>
                 <div style="font-size:0.85rem; font-weight:600; color:#475569;">Conditions to Verify:</div>
                 <ul style="margin:0.25rem 0 0 1.2rem; color:#334155; font-size:0.88rem;">{cond_html}</ul>
@@ -837,6 +953,38 @@ with tabs[5]:
                 for t in plan.threats_to_validity:
                     st.markdown(f"- {t}")
 
+            st.divider()
+            col_ex1, col_ex2 = st.columns([1, 2])
+            with col_ex1:
+                if st.button(f"Run Small-Scale Experiment E{idx}", key=f"exec_exp_{idx}", type="primary"):
+                    with st.spinner("Executing generated 5-seed benchmark script..."):
+                        st.session_state.experiment_runs[idx] = execute_experiment_plan(plan, n_seeds=5)
+            with col_ex2:
+                st.caption("Generates and executes a runnable scikit-learn script (shifted Digits proxy) across 5 seeds with paired t-test.")
+
+            if idx in st.session_state.experiment_runs:
+                exec_res = st.session_state.experiment_runs[idx]
+                out_variant = "green" if exec_res.outcome == "confirmed" else ("red" if exec_res.outcome == "refuted" else "amber")
+                st.markdown(
+                    f"""<div class="hf-card-muted">
+                        <strong>Execution Result:</strong> {pill(exec_res.outcome.upper(), out_variant)}
+                        {pill(f"Delta: {exec_res.delta:+.2f}%", "blue")}
+                        {pill(f"p-value: {exec_res.p_value:.4f}", "slate")}
+                        <p style="margin:0.45rem 0 0.2rem 0; font-size:0.88rem; color:#334155;">{esc(exec_res.summary)}</p>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+                seed_df = pd.DataFrame({
+                    "Seed": exec_res.seeds,
+                    "Baseline Accuracy (%)": exec_res.baseline_scores,
+                    "Proposed Accuracy (%)": exec_res.proposed_scores,
+                })
+                st.dataframe(seed_df, use_container_width=True, hide_index=True)
+
+            with st.expander(f"View Generated Python Script (E{idx})", expanded=False):
+                script_code = generate_experiment_script(plan, n_seeds=5)
+                st.code(script_code, language="python")
+
     st.divider()
     st.subheader("Corpus Knowledge Graph")
     st.caption("NetworkX graph linking Papers, Architectures (merged ViT/ViT-B/16), Datasets, Methods, and Hypotheses.")
@@ -858,8 +1006,56 @@ with tabs[5]:
     plt.close(fig)
 
 
-# --- TAB 7: Ask the Papers (Prompt 08) ---
+# --- TAB 7: Topic & Scope Advisor ---
 with tabs[6]:
+    st.subheader("Topic & Scope Advisor")
+    st.caption("Short scope interview -> recommends 3-5 mini or major options grounded strictly in the active Gap Matrix.")
+
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        target_scope = st.selectbox("Target Project Scale", ["Any", "Mini Project", "Major Project"])
+    with sc2:
+        compute_budget = st.selectbox("Available Compute", ["CPU / Colab Free", "Single GPU", "Multi-GPU"], index=1)
+    with sc3:
+        timeline_weeks = st.slider("Available Timeline (weeks)", min_value=2, max_value=16, value=6)
+
+    interview = ScopeInterview(
+        timeline_weeks=timeline_weeks,
+        compute_budget=compute_budget,
+        goal=target_scope,
+    )
+    recs = recommend_scoped_topics(
+        interview=interview,
+        result=result,
+        max_options=5,
+    )
+
+    if not recs:
+        st.info("No candidate gaps in the current corpus to scope. Search a topic or upload papers with explicit models and datasets.")
+    else:
+        for idx, rec in enumerate(recs, start=1):
+            scope_variant = "green" if rec.scope_label == "mini" else "blue"
+            mot_html = "".join(f"<li>{esc(m)}</li>" for m in rec.motivating_papers)
+            risk_html = "".join(f"<li>{esc(r)}</li>" for r in rec.risks)
+            st.markdown(
+                f"""<div class="hf-card">
+                    <div class="hf-card-title">Option {idx}: {esc(rec.gap_label)}</div>
+                    <div style="margin-bottom:0.55rem;">
+                        {pill(rec.scope_label.upper(), scope_variant)}
+                        {pill(rec.fit_reason, "slate")}
+                    </div>
+                    <div style="font-size:0.88rem; color:#334155;"><strong>Required Compute:</strong> {esc(rec.required_compute)}</div>
+                    <div style="font-size:0.84rem; font-weight:600; color:#475569; margin-top:0.45rem;">Motivating Papers:</div>
+                    <ul style="margin:0.2rem 0 0.35rem 1.2rem; color:#334155; font-size:0.86rem;">{mot_html}</ul>
+                    <div style="font-size:0.84rem; font-weight:600; color:#475569;">Risks to Check:</div>
+                    <ul style="margin:0.2rem 0 0 1.2rem; color:#334155; font-size:0.86rem;">{risk_html}</ul>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+
+# --- TAB 8: Ask the Papers (Prompt 08) ---
+with tabs[7]:
     st.subheader("Ask the Papers")
     st.caption("Ask any question about the loaded papers. Every answer cites numbered [n] passages directly from the source text.")
 
@@ -872,12 +1068,13 @@ with tabs[6]:
 
     user_question = st.chat_input("Ask about the papers or how to build on a gap (e.g., How do I build with any of the gaps?)")
     if user_question:
-        st.session_state.chat_history.append({"role": "user", "content": user_question})
         ans_text, passages_str, mode_note = answer_workspace_question(
             question=user_question,
             result=result,
             llm_fn=llm_callable,
+            chat_history=st.session_state.chat_history,
         )
+        st.session_state.chat_history.append({"role": "user", "content": user_question})
         st.session_state.chat_history.append({
             "role": "assistant",
             "content": f"{ans_text}\n\n*{mode_note}*",
