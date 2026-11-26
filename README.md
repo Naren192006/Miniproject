@@ -1,8 +1,25 @@
-# HypothesisForge: Prompt Pack & Verification System
+# HypothesisForge: Validation-First, Scope-Aware, Evidence-Traceable Hypotheses for ML Projects
 
-This repository implements the versioned prompt loading, templating, execution, validation, and fallback system for **HypothesisForge** (Multi-Agent Research Gap Discovery and Experimental Hypothesis Generation System).
+**Core Claim:** *Validation-first, scope-aware, evidence-traceable hypotheses for ML projects — with measured grounding precision, validator ablations, and executable small-scale verification.*
 
-## Completed Prompts
+This repository implements the versioned prompt loading, templating, execution, validation, evaluation harness, and deterministic fallback system for **HypothesisForge**.
+
+## Measured Evaluation Harness (16 Hand-Labeled Papers)
+
+Run `python scripts/run_grounding_benchmark.py` to reproduce the grounding, gap-matrix, contradiction-precision, and validator ablation benchmark:
+
+| System Variant | Precision | Recall | Unsupported Claim Rate | Quote Pass Rate | Gap Matrix Precision | Contradiction Precision |
+|---|---:|---:|---:|---:|---:|---:|
+| **Plain Unvalidated Baseline** | 60.0% | 75.0% | 40.0% | 60.0% | 50.0% | 0.0% |
+| **Ablation (No Split/Noise Filter)** | 92.3% | 100.0% | 7.7% | 100.0% | 100.0% | 0.0% |
+| **HypothesisForge (Validated)** | **100.0%** | **100.0%** | **0.0%** | **100.0%** | **100.0%** | **100.0%** |
+
+## Honest Framing & Known Limits
+- **No novelty claims:** Gap cells and prior-work checks report *"not found in the N papers searched"* or *"No close match among N results searched; manual check required."* — never *"novel"* or *"first"*.
+- **Condition-aware contradictions:** Differences across papers are decomposed into `dataset`, `metric`, `split`, `hyperparameters`, `seed`, and `architecture` before flagging a `true_conflict`.
+- **Small-scale execution:** Automated experiment stubs run on lightweight benchmarks (`sklearn.datasets.load_digits` with OOD noise/contrast shift) to verify the hypothesis-to-evidence loop; large-scale GPU benchmarks remain a manual step.
+
+## Completed Prompts (01 – 15)
 
 ### 1. `01 Literature Extraction` (`prompts/01_literature_extraction.md`)
 - **Version:** 1.1
@@ -91,6 +108,27 @@ This repository implements the versioned prompt loading, templating, execution, 
   - Only uses numbers that appear in the passage list (rejects hallucinations/unlisted numbers).
   - If passages do not contain the answer, strictly outputs: `"The passages do not answer this question."`.
 
+### 9. `09 Query Rewriter` (`prompts/09_query_rewriter.md`)
+- **Stage:** `query_rewrite` — Rewrites follow-up questions into standalone retrieval queries, classifies intent (`summary | compare | gap | contradiction | topic_advice | factual_qa | out_of_scope`), and splits multi-part questions into at most 3 sub-queries.
+
+### 10. `10 Topic Interviewer` (`prompts/10_topic_interviewer.md`)
+- **Stage:** `topic_interview` — Asks one short plain-language question at a time until all 6 student profile fields (`field_of_interest`, `current_skills`, `available_weeks`, `compute_access`, `project_level`, `preferred_outcome`) are collected.
+
+### 11. `11 Topic Recommender` (`prompts/11_topic_recommender.md`)
+- **Stage:** `topic_recommend` — Proposes 3–5 mini or major student project options strictly traceable to Gap Matrix cells or contradictions, forbidding `"novel"`, `"first"`, `"unexplored"`, and `"state of the art"`.
+
+### 12. `12 Conflict Explainer` (`prompts/12_conflict_explainer.md`)
+- **Stage:** `conflict_explain` — Distinguishes `true_conflict` from `condition_mismatch` and `insufficient_info` with verbatim quotes (`<= 25` words) and page numbers.
+
+### 13. `13 Prior Work Evidence` (`prompts/13_prior_work_evidence.md`)
+- **Stage:** `prior_work_evidence` — Reports up to 5 closest papers and their `architecture` / `dataset` / `metric` overlap without judging novelty.
+
+### 14. `14 Spoken Explainer` (`prompts/14_spoken_explainer.md`)
+- **Stage:** `spoken_explain` — Converts structured results into a `<= 120`-word plain-language spoken summary using `"candidate"` instead of `"finding"` and naming paper IDs and pages.
+
+### 15. `15 Grounded QA` (`prompts/15_grounded_qa.md`)
+- **Stage:** `grounded_qa` — Answers standalone questions strictly from provided passages with `[paper_id, page]` citations and `<= 25`-word verbatim quotes, or returns `answerable: false`.
+
 ---
 
 ## System Architecture & Recovery Workflow
@@ -103,14 +141,24 @@ As defined in the Prompt Pack specification:
 
 ---
 
-## Verification & Testing
+## Verification & Reproducibility
 
-Run all unit and validation tests:
+Install dependencies:
 ```bash
-python -m pytest -v
+pip install -e .
 ```
 
-Run the end-to-end verification audit:
+Run all unit and validation tests (`100` tests):
 ```bash
-python scripts/verify_prompts.py
+python -m pytest -q
+```
+
+Run the 16-paper grounding benchmark & validator ablation:
+```bash
+python scripts/run_grounding_benchmark.py
+```
+
+Launch the Streamlit application:
+```bash
+streamlit run app.py
 ```
