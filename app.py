@@ -1088,13 +1088,13 @@ with tabs[6]:
 
     con_inputs = [
         {
-            "paper_a": c.paper_a_id,
-            "paper_b": c.paper_b_id,
-            "dataset": c.dataset,
-            "classification": c.classification,
-            "explanation": c.explanation,
+            "pair": pair_title,
+            "classification": cj.classification,
+            "confidence_score": cj.confidence_score,
+            "conflict_factors": cj.conflict_factors,
+            "explanation": cj.explanation,
         }
-        for c in result.contradictions
+        for pair_title, cj in result.contradictions
     ]
     scope_criteria_str = f"target_scale={target_scope}, compute_budget={compute_budget}, available_weeks={timeline_weeks}"
     allowed_pids = [p.paper_id for p in result.papers]

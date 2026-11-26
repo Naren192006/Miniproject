@@ -217,3 +217,55 @@ def test_prompt_11_topic_recommender():
     )
     val = ResponseValidator.validate_topic_recommendation(bad_json)
     assert val.is_valid is False
+
+
+def test_prompt_12_conflict_explainer():
+    from hypothesisforge.prompt_engine.validator import ResponseValidator
+
+    runner = PromptRunner()
+
+    # 1. True conflict when dataset, metric, and split all match and values differ
+    rec_a = {
+        "dataset": "PACS",
+        "metric": "Accuracy",
+        "split": "Leave-one-domain-out",
+        "architecture": "ResNet-50",
+        "hyperparameters": "AdamW lr=1e-4",
+        "value": "84.6%",
+        "verbatim_quote": "ResNet-50 achieves 84.6% accuracy on PACS.",
+        "page": 4,
+    }
+    rec_b = {
+        "dataset": "PACS",
+        "metric": "Accuracy",
+        "split": "Leave-one-domain-out",
+        "architecture": "ResNet-50",
+        "hyperparameters": "AdamW lr=1e-4",
+        "value": "78.1%",
+        "verbatim_quote": "ResNet-50 reaches 78.1% accuracy on PACS.",
+        "page": 6,
+    }
+    res_true = runner.run_conflict_explainer(rec_a, rec_b, llm_fn=None)
+    assert res_true.data.verdict == "true_conflict"
+    assert res_true.data.confidence == "high"
+    assert res_true.data.page_a == 4 and res_true.data.page_b == 6
+
+    # 2. Condition mismatch when dataset or split differs
+    rec_c = dict(rec_b, dataset="OfficeHome", split="Random 80/20")
+    res_mis = runner.run_conflict_explainer(rec_a, rec_c, llm_fn=None)
+    assert res_mis.data.verdict == "condition_mismatch"
+    assert "dataset" in res_mis.data.differing_factors
+    assert "split" in res_mis.data.differing_factors
+
+    # 3. Insufficient info when split is missing
+    rec_missing = dict(rec_b, split="")
+    res_insuf = runner.run_conflict_explainer(rec_a, rec_missing, llm_fn=None)
+    assert res_insuf.data.verdict == "insufficient_info"
+
+    # 4. Validator rejects quotes longer than 25 words
+    long_q = " ".join(["word"] * 26)
+    bad_json = (
+        f'{{"verdict":"true_conflict","differing_factors":[],"quote_a":"{long_q}","page_a":1,'
+        '"quote_b":"Short quote","page_b":2,"confidence":"high","explanation":"Both papers match on conditions."}'
+    )
+    assert ResponseValidator.validate_conflict_explainer(bad_json).is_valid is False

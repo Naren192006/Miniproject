@@ -21,6 +21,7 @@ from .models import (
     QueryRewriteOutput,
     TopicInterviewOutput,
     TopicRecommendationOutput,
+    ConflictExplainerOutput,
     count_words,
 )
 
@@ -559,5 +560,57 @@ class ResponseValidator:
                         error_message=msg,
                         retry_prompt=f"{msg}\nUse only datasets from the provided input.",
                     )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
+    def validate_conflict_explainer(
+        cls,
+        raw_text: str,
+        record_a_quote_source: str = "",
+        record_b_quote_source: str = "",
+    ) -> ValidationResult:
+        """Validates Prompt 12 (12_conflict_explainer.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the schema.",
+            )
+
+        try:
+            output = ConflictExplainerOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nKeep each quote <= 25 words with its page number.",
+            )
+
+        if record_a_quote_source and output.quote_a != "N/A":
+            if output.quote_a.lower() not in record_a_quote_source.lower():
+                msg = "Rule violation: quote_a must be a verbatim substring of Record A's text."
+                return ValidationResult(
+                    is_valid=False,
+                    data=output,
+                    raw_json=parsed_json,
+                    error_message=msg,
+                    retry_prompt=f"{msg}\nCopy quote_a verbatim from Record A (<= 25 words).",
+                )
+
+        if record_b_quote_source and output.quote_b != "N/A":
+            if output.quote_b.lower() not in record_b_quote_source.lower():
+                msg = "Rule violation: quote_b must be a verbatim substring of Record B's text."
+                return ValidationResult(
+                    is_valid=False,
+                    data=output,
+                    raw_json=parsed_json,
+                    error_message=msg,
+                    retry_prompt=f"{msg}\nCopy quote_b verbatim from Record B (<= 25 words).",
+                )
 
         return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

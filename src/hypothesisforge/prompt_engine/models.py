@@ -499,3 +499,31 @@ class TopicRecommendationOutput(BaseModel):
         if len(self.options) < 3 and not self.warnings:
             raise ValueError("Rule violation: If fewer than 3 options are returned, include a warning explaining why.")
         return self
+
+
+# ==============================================================================
+# Prompt 12: Condition-Aware Conflict Explainer Models
+# ==============================================================================
+
+class ConflictExplainerOutput(BaseModel):
+    """Schema for Prompt 12: 12_conflict_explainer.md"""
+    verdict: Literal["true_conflict", "condition_mismatch", "insufficient_info"] = Field(...)
+    differing_factors: List[
+        Literal["dataset", "metric", "split", "hyperparameters", "seed", "architecture"]
+    ] = Field(default_factory=list)
+    quote_a: str = Field(...)
+    page_a: int = Field(..., ge=0)
+    quote_b: str = Field(...)
+    page_b: int = Field(..., ge=0)
+    confidence: Literal["low", "medium", "high"] = Field(...)
+    explanation: str = Field(..., min_length=10)
+
+    @model_validator(mode="after")
+    def validate_conflict_rules(self) -> "ConflictExplainerOutput":
+        if count_words(self.quote_a) > 25:
+            raise ValueError(f"Rule violation: quote_a exceeds 25 words ({count_words(self.quote_a)} words).")
+        if count_words(self.quote_b) > 25:
+            raise ValueError(f"Rule violation: quote_b exceeds 25 words ({count_words(self.quote_b)} words).")
+        if self.verdict == "condition_mismatch" and not self.differing_factors:
+            raise ValueError("Rule violation: condition_mismatch requires at least one item in differing_factors.")
+        return self

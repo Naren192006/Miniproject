@@ -21,6 +21,7 @@ from .models import (
     TopicInterviewOutput,
     TopicOptionItem,
     TopicRecommendationOutput,
+    ConflictExplainerOutput,
     count_words,
 )
 
@@ -886,3 +887,124 @@ class RuleBasedTopicRecommender:
             )
 
         return TopicRecommendationOutput(options=options[:5], warnings=warnings)
+
+
+class RuleBasedConflictExplainer:
+    """Deterministic fallback for Prompt 12 (Condition-Aware Conflict Explainer)."""
+
+    @staticmethod
+    def _parse_record(rec: Any) -> Dict[str, Any]:
+        if isinstance(rec, dict):
+            return {str(k).strip().lower(): v for k, v in rec.items()}
+        parsed: Dict[str, Any] = {}
+        if isinstance(rec, str) and rec.strip():
+            try:
+                loaded = json.loads(rec)
+                if isinstance(loaded, dict):
+                    return {str(k).strip().lower(): v for k, v in loaded.items()}
+            except Exception:
+                for line in rec.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        parsed[k.strip().lower()] = v.strip()
+        return parsed
+
+    @staticmethod
+    def _clip_quote(q: Any) -> str:
+        s = str(q or "").strip()
+        if not s:
+            return "N/A"
+        words = s.split()
+        return " ".join(words[:25])
+
+    @staticmethod
+    def _safe_page(p: Any) -> int:
+        try:
+            return max(0, int(p))
+        except Exception:
+            return 0
+
+    @classmethod
+    def explain(cls, record_a: Any, record_b: Any) -> ConflictExplainerOutput:
+        a = cls._parse_record(record_a)
+        b = cls._parse_record(record_b)
+
+        quote_a = cls._clip_quote(a.get("verbatim_quote") or a.get("quote"))
+        quote_b = cls._clip_quote(b.get("verbatim_quote") or b.get("quote"))
+        page_a = cls._safe_page(a.get("page"))
+        page_b = cls._safe_page(b.get("page"))
+
+        ds_a, ds_b = str(a.get("dataset", "")).strip(), str(b.get("dataset", "")).strip()
+        met_a, met_b = str(a.get("metric", "")).strip(), str(b.get("metric", "")).strip()
+        spl_a, spl_b = str(a.get("split", "")).strip(), str(b.get("split", "")).strip()
+
+        if not (ds_a and ds_b and met_a and met_b and spl_a and spl_b):
+            return ConflictExplainerOutput(
+                verdict="insufficient_info",
+                differing_factors=[],
+                quote_a=quote_a,
+                page_a=page_a,
+                quote_b=quote_b,
+                page_b=page_b,
+                confidence="low",
+                explanation="One or both records are missing dataset, metric, or split information needed to compare conditions.",
+            )
+
+        differing: List[str] = []
+        if ds_a.lower() != ds_b.lower():
+            differing.append("dataset")
+        if met_a.lower() != met_b.lower():
+            differing.append("metric")
+        if spl_a.lower() != spl_b.lower():
+            differing.append("split")
+
+        arch_a, arch_b = str(a.get("architecture", "")).strip(), str(b.get("architecture", "")).strip()
+        hyp_a, hyp_b = str(a.get("hyperparameters", "")).strip(), str(b.get("hyperparameters", "")).strip()
+        seed_a, seed_b = str(a.get("seed", "")).strip(), str(b.get("seed", "")).strip()
+
+        if arch_a and arch_b and arch_a.lower() != arch_b.lower():
+            differing.append("architecture")
+        if hyp_a and hyp_b and hyp_a.lower() != hyp_b.lower():
+            differing.append("hyperparameters")
+        if seed_a and seed_b and seed_a.lower() != seed_b.lower():
+            differing.append("seed")
+
+        core_mismatch = any(f in differing for f in ("dataset", "metric", "split"))
+        if core_mismatch:
+            return ConflictExplainerOutput(
+                verdict="condition_mismatch",
+                differing_factors=differing,  # type: ignore
+                quote_a=quote_a,
+                page_a=page_a,
+                quote_b=quote_b,
+                page_b=page_b,
+                confidence="high",
+                explanation=f"Core evaluation conditions differ ({', '.join(differing)}), so the reported values are not directly comparable.",
+            )
+
+        # Dataset, metric, and split all match
+        val_a = str(a.get("value", "")).strip()
+        val_b = str(b.get("value", "")).strip()
+        if val_a and val_b and val_a.lower() != val_b.lower():
+            conf = "medium" if differing else "high"
+            return ConflictExplainerOutput(
+                verdict="true_conflict",
+                differing_factors=differing,  # type: ignore
+                quote_a=quote_a,
+                page_a=page_a,
+                quote_b=quote_b,
+                page_b=page_b,
+                confidence=conf,  # type: ignore
+                explanation=f"Dataset ({ds_a}), metric ({met_a}), and split ({spl_a}) match while values differ ({val_a} vs {val_b}).",
+            )
+
+        return ConflictExplainerOutput(
+            verdict="insufficient_info",
+            differing_factors=differing,  # type: ignore
+            quote_a=quote_a,
+            page_a=page_a,
+            quote_b=quote_b,
+            page_b=page_b,
+            confidence="low",
+            explanation="Conditions match, but differing conclusions or values could not be confirmed from the provided fields.",
+        )
