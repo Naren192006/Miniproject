@@ -1082,18 +1082,23 @@ with tabs[6]:
     if advisor_search_btn and mind_topic.strip():
         with st.spinner(f"Searching papers for '{mind_topic.strip()}' and extracting research topics..."):
             found_meta = discover_papers(
-                mind_topic.strip(),
-                sources=["arXiv", "OpenAlex", "Semantic Scholar"],
-                max_results=12,
+                topic=mind_topic.strip(),
+                max_papers=12,
+                source_mode="All (arXiv + OpenAlex + IEEE)",
             )
             if not found_meta:
                 st.warning("No papers found for that topic. Try broader keywords.")
             else:
-                fetched_docs = fetch_paper_documents(found_meta, download_pdf=False)
+                fetched_docs = fetch_paper_documents(found_meta, download_pdfs=False)
                 if fetched_docs:
-                    new_res = run_full_pipeline(fetched_docs, llm_fn=llm_callable)
-                    st.session_state.pipeline_result = new_res
-                    st.session_state.active_corpus_sig = compute_corpus_signature(fetched_docs)
+                    st.session_state.papers = fetched_docs
+                    st.session_state.analysis_result = run_full_pipeline(
+                        fetched_docs,
+                        llm_fn=llm_callable,
+                        mode_label=provider_label,
+                        topic=mind_topic.strip(),
+                    )
+                    st.session_state.chat_history = []
                     st.rerun()
 
     sc1, sc2, sc3 = st.columns(3)
