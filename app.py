@@ -26,6 +26,7 @@ from hypothesisforge.ingestion import PaperDocument, extract_pdf_bytes
 from hypothesisforge.scope_advisor import ScopeInterview, recommend_scoped_topics
 from hypothesisforge.llm_client import get_llm_callable_from_env
 from hypothesisforge.paper_search import discover_papers, fetch_paper_documents
+from hypothesisforge.prompt_engine.runner import PromptRunner
 from hypothesisforge.pipeline import (
     AnalysisPipelineResult,
     answer_workspace_question,
@@ -411,7 +412,7 @@ with st.sidebar:
             ["All (arXiv + OpenAlex + IEEE)", "arXiv + OpenAlex", "IEEE only", "arXiv only", "OpenAlex only"],
         )
         download_pdfs = st.checkbox("Download full PDFs when available", value=True)
-        search_run_btn = st.button("Search & Run Analysis", type="primary", use_container_width=True)
+        search_run_btn = st.button("Search & Run Analysis", type="primary", width="stretch")
 
         if search_run_btn:
             if not topic_query.strip():
@@ -447,7 +448,7 @@ with st.sidebar:
             accept_multiple_files=True,
             help="Upload ML/DL research papers in PDF format (up to 200 MB per file).",
         )
-        run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
+        run_btn = st.button("Run Analysis", type="primary", width="stretch")
 
         if run_btn:
             if uploaded_files:
@@ -590,7 +591,7 @@ with tabs[0]:
             }
             for a in result.audit_log
         ]
-        st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(audit_rows), width="stretch", hide_index=True)
 
     with st.expander("Evaluation Harness (16-Paper Benchmark, Gap & Contradiction Precision, Ablation)", expanded=False):
         st.caption("Measures extraction precision, unsupported-claim rate, quote pass rate, gap precision, and contradiction precision.")
@@ -616,7 +617,7 @@ with tabs[0]:
             bc1, bc2 = st.columns(2)
             bc1.metric("Gap Matrix Precision", f"{bdata['gap_precision']:.1f}%")
             bc2.metric("Contradiction Precision", f"{bdata['contradiction_precision']:.1f}%")
-            st.dataframe(pd.DataFrame(bdata["table"]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(bdata["table"]), width="stretch", hide_index=True)
 
     export_payload = {
         "report_summary": result.report_summary.model_dump() if result.report_summary else None,
@@ -674,7 +675,7 @@ with tabs[1]:
             }
             for r in rec.reported_results
         ])
-        st.dataframe(res_df, use_container_width=True, hide_index=True)
+        st.dataframe(res_df, width="stretch", hide_index=True)
     else:
         st.info("No numeric results extracted with full context.")
 
@@ -725,7 +726,7 @@ with tabs[2]:
     )
 
     if result.matrix_rows:
-        st.dataframe(pd.DataFrame(result.matrix_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(result.matrix_rows), width="stretch", hide_index=True)
 
     st.subheader("Topic & Scope Advisor")
     st.caption("Short scope interview: recommends 3–5 mini or major options grounded strictly in the Gap Matrix above.")
@@ -781,44 +782,6 @@ with tabs[2]:
                 <p style="margin-bottom:0.5rem; color:#334155;">{esc(assessment.reason)}</p>
                 <div style="font-size:0.85rem; font-weight:600; color:#475569;">Questions to Check:</div>
                 <ul style="margin:0.25rem 0 0 1.2rem; color:#334155; font-size:0.88rem;">{qs_html}</ul>
-            </div>""",
-            unsafe_allow_html=True,
-        )
-
-    st.divider()
-    st.subheader("Topic & Scope Advisor")
-    st.caption("Short scope interview — recommends 3–5 mini or major options grounded directly in the Gap Matrix above.")
-    sc1, sc2, sc3 = st.columns(3)
-    with sc1:
-        target_scope = st.selectbox("Target Project Scale", ["Both", "Mini Project", "Major Thesis"], key="scope_scale")
-    with sc2:
-        compute_budget = st.selectbox("Available Compute", ["Single GPU", "CPU only", "Multi-GPU"], key="scope_compute")
-    with sc3:
-        timeframe = st.selectbox("Timeframe", ["1-2 months", "1-2 weeks", "Semester"], key="scope_time")
-
-    scoped_options = recommend_scoped_topics(
-        result,
-        target_scope=target_scope,
-        compute_budget=compute_budget,
-        timeframe=timeframe,
-        max_options=5,
-    )
-    if not scoped_options:
-        st.info("No candidate gaps available yet to recommend scoped topics.")
-    for opt in scoped_options:
-        scope_variant = "blue" if opt.scope_label == "mini" else "amber"
-        mot_html = "".join(f"<li>{esc(m)}</li>" for m in opt.motivating_papers)
-        risk_html = "".join(f"<li>{esc(r)}</li>" for r in opt.risks)
-        st.markdown(
-            f"""<div class="hf-card">
-                <div class="hf-card-title">{esc(opt.option_title)} {pill(opt.scope_label.upper(), scope_variant)}</div>
-                <div style="font-size:0.86rem; color:#475569; margin-bottom:0.45rem;">
-                    <strong>Fit:</strong> {esc(opt.fit_reason)} · <strong>Compute:</strong> {esc(opt.required_compute)}
-                </div>
-                <div style="font-size:0.83rem; font-weight:600; color:#475569;">Motivating Papers:</div>
-                <ul style="margin:0.15rem 0 0.4rem 1.2rem; font-size:0.85rem; color:#334155;">{mot_html}</ul>
-                <div style="font-size:0.83rem; font-weight:600; color:#475569;">Risks:</div>
-                <ul style="margin:0.15rem 0 0 1.2rem; font-size:0.85rem; color:#334155;">{risk_html}</ul>
             </div>""",
             unsafe_allow_html=True,
         )
@@ -979,7 +942,7 @@ with tabs[5]:
                     "Baseline Accuracy (%)": exec_res.baseline_scores,
                     "Proposed Accuracy (%)": exec_res.proposed_scores,
                 })
-                st.dataframe(seed_df, use_container_width=True, hide_index=True)
+                st.dataframe(seed_df, width="stretch", hide_index=True)
 
             with st.expander(f"View Generated Python Script (E{idx})", expanded=False):
                 script_code = generate_experiment_script(plan, n_seeds=5)
@@ -1002,7 +965,7 @@ with tabs[5]:
         visible_types=visible_types,
         show_edge_labels=show_edge_labels,
     )
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close(fig)
 
 
@@ -1015,7 +978,7 @@ with tabs[6]:
         st.session_state["topic_interview_answers"] = {}
 
     ans_dict = st.session_state["topic_interview_answers"]
-    interview_res = PromptRunner().run_topic_interview(answers=ans_dict, llm_fn=llm_fn)
+    interview_res = PromptRunner().run_topic_interview(answers=ans_dict, llm_fn=llm_callable)
     interview_state = interview_res.data
 
     with st.expander("Guided Interview (Prompt 10)", expanded=not interview_state.ready):
@@ -1108,7 +1071,7 @@ with tabs[6]:
         n_papers=len(result.papers),
         allowed_paper_ids=allowed_pids,
         allowed_datasets=allowed_ds,
-        llm_fn=llm_fn,
+        llm_fn=llm_callable,
     )
     topic_out = rec_exec.data
 
