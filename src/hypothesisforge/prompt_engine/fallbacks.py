@@ -22,6 +22,8 @@ from .models import (
     TopicOptionItem,
     TopicRecommendationOutput,
     ConflictExplainerOutput,
+    ClosestPaperItem,
+    PriorWorkEvidenceOutput,
     count_words,
 )
 
@@ -1008,3 +1010,76 @@ class RuleBasedConflictExplainer:
             confidence="low",
             explanation="Conditions match, but differing conclusions or values could not be confirmed from the provided fields.",
         )
+
+
+class RuleBasedPriorWorkReporter:
+    """Deterministic fallback for Prompt 13 (Prior-Work Evidence Reporter)."""
+
+    @classmethod
+    def report(cls, hypothesis: str, results: Any) -> PriorWorkEvidenceOutput:
+        items: List[Dict[str, Any]] = []
+        if isinstance(results, list):
+            items = [r for r in results if isinstance(r, dict)]
+        elif isinstance(results, str) and results.strip():
+            try:
+                loaded = json.loads(results)
+                if isinstance(loaded, list):
+                    items = [r for r in loaded if isinstance(r, dict)]
+            except Exception:
+                pass
+
+        n = len(items)
+        hyp_low = hypothesis.lower()
+        hyp_archs = [a.lower() for a in KNOWN_ARCHITECTURES if a.lower() in hyp_low]
+        hyp_datasets = [d.lower() for d in KNOWN_DATASETS if d.lower() in hyp_low]
+        hyp_metrics = [m.lower() for m in KNOWN_METRICS if m.lower() in hyp_low]
+
+        scored: List[Tuple[int, ClosestPaperItem]] = []
+        for idx, item in enumerate(items, start=1):
+            pid = str(item.get("id") or item.get("paper_id") or f"R-{idx}").strip()
+            title = str(item.get("title") or "Untitled").strip()
+            abstract = str(item.get("abstract") or item.get("summary") or "").strip()
+            year = item.get("year", "")
+            text_low = f"{title} {abstract}".lower()
+
+            overlap: List[str] = []
+            if any(a in text_low for a in hyp_archs):
+                overlap.append("architecture")
+            if any(d in text_low for d in hyp_datasets):
+                overlap.append("dataset")
+            if any(m in text_low for m in hyp_metrics):
+                overlap.append("metric")
+
+            score = len(overlap)
+            if not overlap:
+                overlap = ["none"]
+                note = f"No architecture, dataset, or metric overlap found in abstract ({year or 'year n/a'})."
+            else:
+                note = f"Abstract mentions matching {', '.join(overlap)} ({year or 'year n/a'})."
+
+            scored.append(
+                (
+                    score,
+                    ClosestPaperItem(
+                        id=pid,
+                        title=title,
+                        overlap=overlap,  # type: ignore
+                        note=note,
+                    ),
+                )
+            )
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_items = [c for _, c in scored[:5]]
+        any_overlap = any(s > 0 for s, _ in scored[:5])
+
+        if not any_overlap:
+            statement = f"No close match among {n} results searched; manual check required."
+        else:
+            matched_cnt = sum(1 for s, _ in scored if s > 0)
+            statement = (
+                f"Found {matched_cnt} paper(s) with partial overlap among {n} results searched; "
+                "manual review of full text is recommended."
+            )
+
+        return PriorWorkEvidenceOutput(closest=top_items, statement=statement)

@@ -269,3 +269,42 @@ def test_prompt_12_conflict_explainer():
         '"quote_b":"Short quote","page_b":2,"confidence":"high","explanation":"Both papers match on conditions."}'
     )
     assert ResponseValidator.validate_conflict_explainer(bad_json).is_valid is False
+
+
+def test_prompt_13_prior_work_evidence():
+    from hypothesisforge.prompt_engine.validator import ResponseValidator
+
+    runner = PromptRunner()
+    hyp = "If ResNet-50 is evaluated on PACS, then Accuracy changes relative to ViT-B/16."
+
+    # 1. Partial overlap on architecture + dataset
+    search_results = [
+        {
+            "id": "AX-1",
+            "title": "Domain Generalization with ResNet-50 on PACS",
+            "year": 2023,
+            "abstract": "We evaluate ResNet-50 on PACS and report accuracy across four domains.",
+        },
+        {
+            "id": "AX-2",
+            "title": "Unrelated NLP Study",
+            "year": 2022,
+            "abstract": "Language modeling on WikiText using transformers.",
+        },
+    ]
+    res = runner.run_prior_work_evidence(hyp, search_results, llm_fn=None)
+    assert len(res.data.closest) <= 5
+    assert res.data.closest[0].id == "AX-1"
+    assert "architecture" in res.data.closest[0].overlap
+    assert "dataset" in res.data.closest[0].overlap
+
+    # 2. No overlap -> exact required phrasing
+    no_overlap_results = [
+        {"id": "AX-9", "title": "Tabular XGBoost", "year": 2021, "abstract": "Gradient boosting on census data."}
+    ]
+    res_none = runner.run_prior_work_evidence(hyp, no_overlap_results, llm_fn=None)
+    assert res_none.data.statement == "No close match among 1 results searched; manual check required."
+
+    # 3. Validator rejects novelty claims
+    bad_json = '{"closest":[],"statement":"This hypothesis is completely novel."}'
+    assert ResponseValidator.validate_prior_work_evidence(bad_json).is_valid is False

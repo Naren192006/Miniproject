@@ -527,3 +527,30 @@ class ConflictExplainerOutput(BaseModel):
         if self.verdict == "condition_mismatch" and not self.differing_factors:
             raise ValueError("Rule violation: condition_mismatch requires at least one item in differing_factors.")
         return self
+
+
+# ==============================================================================
+# Prompt 13: Prior-Work Evidence Reporter Models
+# ==============================================================================
+
+class ClosestPaperItem(BaseModel):
+    """Single prior-work overlap item for Prompt 13."""
+    id: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1)
+    overlap: List[Literal["architecture", "dataset", "metric", "none"]] = Field(default_factory=list)
+    note: str = Field(..., min_length=3)
+
+
+class PriorWorkEvidenceOutput(BaseModel):
+    """Schema for Prompt 13: 13_prior_work_evidence.md"""
+    closest: List[ClosestPaperItem] = Field(default_factory=list, max_length=5)
+    statement: str = Field(..., min_length=5)
+
+    @model_validator(mode="after")
+    def validate_never_judge_novelty(self) -> "PriorWorkEvidenceOutput":
+        texts = [self.statement] + [item.note for item in self.closest]
+        combined = " ".join(texts).lower()
+        for pat in [*FORBIDDEN_TOPIC_WORDS, r"\bnovelty\b"]:
+            if re.search(pat, combined):
+                raise ValueError(f"Rule violation: Never judge novelty or use forbidden wording matching '{pat}'.")
+        return self

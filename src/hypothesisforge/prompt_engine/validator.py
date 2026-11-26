@@ -22,6 +22,7 @@ from .models import (
     TopicInterviewOutput,
     TopicRecommendationOutput,
     ConflictExplainerOutput,
+    PriorWorkEvidenceOutput,
     count_words,
 )
 
@@ -611,6 +612,48 @@ class ResponseValidator:
                     raw_json=parsed_json,
                     error_message=msg,
                     retry_prompt=f"{msg}\nCopy quote_b verbatim from Record B (<= 25 words).",
+                )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
+    def validate_prior_work_evidence(
+        cls,
+        raw_text: str,
+        allowed_result_ids: Optional[List[str]] = None,
+    ) -> ValidationResult:
+        """Validates Prompt 13 (13_prior_work_evidence.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the schema.",
+            )
+
+        try:
+            output = PriorWorkEvidenceOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nList up to 5 closest papers and never judge novelty.",
+            )
+
+        if allowed_result_ids:
+            allowed_set = {r.strip() for r in allowed_result_ids if r.strip()}
+            bad_ids = [item.id for item in output.closest if item.id not in allowed_set]
+            if bad_ids:
+                msg = f"Rule violation: Do not invent result IDs. Unknown IDs: {bad_ids}"
+                return ValidationResult(
+                    is_valid=False,
+                    data=output,
+                    raw_json=parsed_json,
+                    error_message=msg,
+                    retry_prompt=f"{msg}\nUse only IDs from the provided search results.",
                 )
 
         return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

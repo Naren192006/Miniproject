@@ -23,6 +23,7 @@ from .fallbacks import (
     RuleBasedTopicInterviewer,
     RuleBasedTopicRecommender,
     RuleBasedConflictExplainer,
+    RuleBasedPriorWorkReporter,
 )
 from .models import (
     LiteratureExtractionOutput,
@@ -37,6 +38,7 @@ from .models import (
     TopicInterviewOutput,
     TopicRecommendationOutput,
     ConflictExplainerOutput,
+    PriorWorkEvidenceOutput,
 )
 
 
@@ -861,6 +863,76 @@ class PromptRunner:
             )
 
         fallback_data = RuleBasedConflictExplainer.explain(record_a, record_b)
+        return PromptExecutionResult(
+            prompt_name=prompt_def.name,
+            prompt_version=prompt_def.version,
+            data=fallback_data,
+            raw_output=retry_reply,
+            retries_used=1,
+            used_fallback=True,
+            validation_error=retry_val.error_message or val.error_message,
+        )
+
+    def run_prior_work_evidence(
+        self,
+        hypothesis: str,
+        results: Any,
+        allowed_result_ids: Optional[list] = None,
+        llm_fn: Optional[LLMCallable] = None,
+    ) -> PromptExecutionResult:
+        """Runs Prompt 13: 13_prior_work_evidence.md"""
+        import json as _json
+
+        prompt_def = self.loader.load_prompt("13_prior_work_evidence")
+        results_list = results if isinstance(results, list) else []
+        n_results = len(results_list)
+        results_str = _json.dumps(results, ensure_ascii=False) if isinstance(results, (list, dict)) else str(results)
+        user_prompt = prompt_def.render_user_prompt(
+            hypothesis=hypothesis,
+            results=results_str,
+            n=str(n_results),
+        )
+
+        if llm_fn is None:
+            fallback_data = RuleBasedPriorWorkReporter.report(hypothesis, results)
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version="not used",
+                data=fallback_data,
+                raw_output="[No LLM configured - Rule-based prior-work reporter executed]",
+                retries_used=0,
+                used_fallback=True,
+                prompt_used=False,
+            )
+
+        raw_reply = llm_fn(prompt_def.system_prompt, user_prompt)
+        val = ResponseValidator.validate_prior_work_evidence(raw_reply, allowed_result_ids=allowed_result_ids)
+
+        if val.is_valid and val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=val.data,
+                raw_output=raw_reply,
+                retries_used=0,
+                used_fallback=False,
+            )
+
+        retry_prompt = f"{user_prompt}\n\nIMPORTANT CORRECTION: {val.retry_prompt}"
+        retry_reply = llm_fn(prompt_def.system_prompt, retry_prompt)
+        retry_val = ResponseValidator.validate_prior_work_evidence(retry_reply, allowed_result_ids=allowed_result_ids)
+
+        if retry_val.is_valid and retry_val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=retry_val.data,
+                raw_output=retry_reply,
+                retries_used=1,
+                used_fallback=False,
+            )
+
+        fallback_data = RuleBasedPriorWorkReporter.report(hypothesis, results)
         return PromptExecutionResult(
             prompt_name=prompt_def.name,
             prompt_version=prompt_def.version,
