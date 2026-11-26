@@ -554,3 +554,24 @@ class PriorWorkEvidenceOutput(BaseModel):
             if re.search(pat, combined):
                 raise ValueError(f"Rule violation: Never judge novelty or use forbidden wording matching '{pat}'.")
         return self
+
+
+# ==============================================================================
+# Prompt 14: Spoken Explanation Formatter Models
+# ==============================================================================
+
+class SpokenExplanationOutput(BaseModel):
+    """Schema for Prompt 14: 14_spoken_explainer.md"""
+    spoken_text: str = Field(..., min_length=10)
+    sources: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_spoken_rules(self) -> "SpokenExplanationOutput":
+        wc = count_words(self.spoken_text)
+        if wc > 120:
+            raise ValueError(f"Rule violation: spoken_text must be 120 words or fewer (got {wc}).")
+        if re.search(r"\bfinding(s)?\b", self.spoken_text, re.I):
+            raise ValueError("Rule violation: Say 'candidate' instead of 'finding' for gaps and contradictions.")
+        if any(sym in self.spoken_text for sym in ["|", "**", "##", "```"]):
+            raise ValueError("Rule violation: No markdown tables or formatting symbols allowed in spoken_text.")
+        return self

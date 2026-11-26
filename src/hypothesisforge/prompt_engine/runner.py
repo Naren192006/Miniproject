@@ -24,6 +24,7 @@ from .fallbacks import (
     RuleBasedTopicRecommender,
     RuleBasedConflictExplainer,
     RuleBasedPriorWorkReporter,
+    RuleBasedSpokenExplainer,
 )
 from .models import (
     LiteratureExtractionOutput,
@@ -39,6 +40,7 @@ from .models import (
     TopicRecommendationOutput,
     ConflictExplainerOutput,
     PriorWorkEvidenceOutput,
+    SpokenExplanationOutput,
 )
 
 
@@ -933,6 +935,68 @@ class PromptRunner:
             )
 
         fallback_data = RuleBasedPriorWorkReporter.report(hypothesis, results)
+        return PromptExecutionResult(
+            prompt_name=prompt_def.name,
+            prompt_version=prompt_def.version,
+            data=fallback_data,
+            raw_output=retry_reply,
+            retries_used=1,
+            used_fallback=True,
+            validation_error=retry_val.error_message or val.error_message,
+        )
+
+    def run_spoken_explanation(
+        self,
+        result_json: Any,
+        llm_fn: Optional[LLMCallable] = None,
+    ) -> PromptExecutionResult:
+        """Runs Prompt 14: 14_spoken_explainer.md"""
+        import json as _json
+
+        prompt_def = self.loader.load_prompt("14_spoken_explainer")
+        res_str = _json.dumps(result_json, ensure_ascii=False) if isinstance(result_json, (dict, list)) else str(result_json)
+        user_prompt = prompt_def.render_user_prompt(result_json=res_str)
+
+        if llm_fn is None:
+            fallback_data = RuleBasedSpokenExplainer.format(result_json)
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version="not used",
+                data=fallback_data,
+                raw_output="[No LLM configured - Rule-based spoken explainer executed]",
+                retries_used=0,
+                used_fallback=True,
+                prompt_used=False,
+            )
+
+        raw_reply = llm_fn(prompt_def.system_prompt, user_prompt)
+        val = ResponseValidator.validate_spoken_explanation(raw_reply)
+
+        if val.is_valid and val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=val.data,
+                raw_output=raw_reply,
+                retries_used=0,
+                used_fallback=False,
+            )
+
+        retry_prompt = f"{user_prompt}\n\nIMPORTANT CORRECTION: {val.retry_prompt}"
+        retry_reply = llm_fn(prompt_def.system_prompt, retry_prompt)
+        retry_val = ResponseValidator.validate_spoken_explanation(retry_reply)
+
+        if retry_val.is_valid and retry_val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=retry_val.data,
+                raw_output=retry_reply,
+                retries_used=1,
+                used_fallback=False,
+            )
+
+        fallback_data = RuleBasedSpokenExplainer.format(result_json)
         return PromptExecutionResult(
             prompt_name=prompt_def.name,
             prompt_version=prompt_def.version,

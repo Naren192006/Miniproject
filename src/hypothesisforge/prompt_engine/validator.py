@@ -23,6 +23,7 @@ from .models import (
     TopicRecommendationOutput,
     ConflictExplainerOutput,
     PriorWorkEvidenceOutput,
+    SpokenExplanationOutput,
     count_words,
 )
 
@@ -655,5 +656,30 @@ class ResponseValidator:
                     error_message=msg,
                     retry_prompt=f"{msg}\nUse only IDs from the provided search results.",
                 )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
+    def validate_spoken_explanation(cls, raw_text: str) -> ValidationResult:
+        """Validates Prompt 14 (14_spoken_explainer.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the schema.",
+            )
+
+        try:
+            output = SpokenExplanationOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nKeep spoken_text <= 120 words, say 'candidate' instead of 'finding', and avoid symbols.",
+            )
 
         return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

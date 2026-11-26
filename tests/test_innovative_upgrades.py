@@ -308,3 +308,32 @@ def test_prompt_13_prior_work_evidence():
     # 3. Validator rejects novelty claims
     bad_json = '{"closest":[],"statement":"This hypothesis is completely novel."}'
     assert ResponseValidator.validate_prior_work_evidence(bad_json).is_valid is False
+
+
+def test_prompt_14_spoken_explainer():
+    from hypothesisforge.prompt_engine.models import count_words
+    from hypothesisforge.prompt_engine.validator import ResponseValidator
+
+    runner = PromptRunner()
+    payload = {
+        "title": "ResNet-50 on OfficeHome",
+        "verdict": "condition_mismatch",
+        "explanation": "This finding shows two papers used different splits.",
+        "evidence_ids": ["P-101"],
+        "sources": ["P-101 p.4", "P-202 p.7"],
+    }
+    res = runner.run_spoken_explanation(payload, llm_fn=None)
+    assert count_words(res.data.spoken_text) <= 120
+    assert "finding" not in res.data.spoken_text.lower()
+    assert "candidate" in res.data.spoken_text.lower()
+    assert "P-101 p.4" in res.data.spoken_text
+    assert "P-202 p.7" in res.data.spoken_text
+    assert res.data.sources == ["P-101 p.4", "P-202 p.7"]
+
+    # Validator rejects 'finding' and > 120 words
+    bad_finding = '{"spoken_text":"This finding is important. Check P-1 p.1 on screen.","sources":["P-1 p.1"]}'
+    assert ResponseValidator.validate_spoken_explanation(bad_finding).is_valid is False
+
+    too_long = " ".join(["word"] * 125)
+    bad_len = f'{{"spoken_text":"{too_long}","sources":["P-1 p.1"]}}'
+    assert ResponseValidator.validate_spoken_explanation(bad_len).is_valid is False

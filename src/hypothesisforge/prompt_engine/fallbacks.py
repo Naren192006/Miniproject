@@ -24,6 +24,7 @@ from .models import (
     ConflictExplainerOutput,
     ClosestPaperItem,
     PriorWorkEvidenceOutput,
+    SpokenExplanationOutput,
     count_words,
 )
 
@@ -1083,3 +1084,90 @@ class RuleBasedPriorWorkReporter:
             )
 
         return PriorWorkEvidenceOutput(closest=top_items, statement=statement)
+
+
+class RuleBasedSpokenExplainer:
+    """Deterministic fallback for Prompt 14 (Spoken Explanation Formatter)."""
+
+    @classmethod
+    def format(cls, result_json: Any) -> SpokenExplanationOutput:
+        data: Dict[str, Any] = {}
+        if isinstance(result_json, dict):
+            data = result_json
+        elif isinstance(result_json, str) and result_json.strip():
+            try:
+                loaded = json.loads(result_json)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {"summary": result_json}
+
+        # Collect sources ("P-... p.N")
+        sources: List[str] = []
+        raw_sources = data.get("sources")
+        if isinstance(raw_sources, list):
+            for s in raw_sources:
+                s_str = str(s).strip()
+                if s_str and s_str not in sources:
+                    sources.append(s_str)
+
+        if not sources:
+            # Extract from paper_a / paper_b or evidence_ids or regex
+            pa = data.get("paper_a") or data.get("paper_a_id")
+            pb = data.get("paper_b") or data.get("paper_b_id")
+            if pa:
+                pg_a = data.get("page_a", 1)
+                sources.append(f"{pa} p.{pg_a}")
+            if pb:
+                pg_b = data.get("page_b", 1)
+                sources.append(f"{pb} p.{pg_b}")
+
+        if not sources:
+            for key in ("evidence_ids", "papers_to_read", "cited_paper_ids", "motivating_papers"):
+                vals = data.get(key)
+                if isinstance(vals, list):
+                    for pid in vals:
+                        tag = f"{pid} p.1"
+                        if tag not in sources:
+                            sources.append(tag)
+
+        if not sources:
+            found_ids = re.findall(r"\bP-[A-Z0-9]+\b", json.dumps(data))
+            for pid in found_ids[:4]:
+                tag = f"{pid} p.1"
+                if tag not in sources:
+                    sources.append(tag)
+
+        if not sources:
+            sources = ["P-CORPUS p.1"]
+
+        # Build plain-language explanation from available fields
+        parts: List[str] = []
+        title = data.get("title") or data.get("gap_label") or ""
+        verdict = data.get("verdict") or data.get("classification") or ""
+        reason = data.get("explanation") or data.get("reason") or data.get("statement") or data.get("summary") or ""
+
+        if title:
+            parts.append(f"Here is a candidate option: {title}.")
+        if verdict:
+            parts.append(f"The comparison status is {str(verdict).replace('_', ' ')}.")
+        if reason:
+            parts.append(str(reason).strip())
+        if not parts:
+            parts.append("Here is a candidate summary from the loaded papers.")
+
+        # Strip markdown symbols and replace 'finding' with 'candidate'
+        text = " ".join(parts)
+        for sym in ("**", "##", "```", "|", "*", "`"):
+            text = text.replace(sym, "")
+        text = re.sub(r"\bfindings\b", "candidates", text, flags=re.I)
+        text = re.sub(r"\bfinding\b", "candidate", text, flags=re.I)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        source_clause = f"You can check {', '.join(sources[:4])} on screen."
+        max_body_words = max(10, 118 - count_words(source_clause))
+        body_words = text.split()[:max_body_words]
+        body_text = " ".join(body_words).rstrip(".,;:") + "."
+
+        spoken_text = f"{body_text} {source_clause}".strip()
+        return SpokenExplanationOutput(spoken_text=spoken_text, sources=sources[:6])
