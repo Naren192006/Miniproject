@@ -24,6 +24,7 @@ from .models import (
     ConflictExplainerOutput,
     PriorWorkEvidenceOutput,
     SpokenExplanationOutput,
+    GroundedQAOutput,
     count_words,
 )
 
@@ -681,5 +682,47 @@ class ResponseValidator:
                 error_message=msg,
                 retry_prompt=f"Validation errors:\n{msg}\nKeep spoken_text <= 120 words, say 'candidate' instead of 'finding', and avoid symbols.",
             )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
+    def validate_grounded_qa(
+        cls,
+        raw_text: str,
+        passages_source: str = "",
+    ) -> ValidationResult:
+        """Validates Prompt 15 (15_grounded_qa.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only matching the schema.",
+            )
+
+        try:
+            output = GroundedQAOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nCite [paper_id, page] with <= 25-word verbatim quotes, or set answerable: false.",
+            )
+
+        if passages_source and output.answerable:
+            src_low = passages_source.lower()
+            for claim in output.claims:
+                if claim.quote.lower() not in src_low:
+                    msg = f"Rule violation: Quote must be copied verbatim from passages: '{claim.quote}'"
+                    return ValidationResult(
+                        is_valid=False,
+                        data=output,
+                        raw_json=parsed_json,
+                        error_message=msg,
+                        retry_prompt=f"{msg}\nCopy verbatim quotes (<= 25 words) directly from the provided passages.",
+                    )
 
         return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

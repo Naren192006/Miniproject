@@ -575,3 +575,37 @@ class SpokenExplanationOutput(BaseModel):
         if any(sym in self.spoken_text for sym in ["|", "**", "##", "```"]):
             raise ValueError("Rule violation: No markdown tables or formatting symbols allowed in spoken_text.")
         return self
+
+
+# ==============================================================================
+# Prompt 15: Grounded JSON Passage Q&A Models
+# ==============================================================================
+
+class GroundedClaimItem(BaseModel):
+    """Single grounded claim with [paper_id, page] citation and <= 25-word quote."""
+    text: str = Field(..., min_length=5)
+    paper_id: str = Field(..., min_length=1)
+    page: int = Field(..., ge=0)
+    quote: str = Field(..., min_length=3)
+
+    @field_validator("quote")
+    @classmethod
+    def validate_quote_length(cls, v: str) -> str:
+        wc = count_words(v)
+        if wc > 25:
+            raise ValueError(f"Rule violation: quote must be 25 words or fewer (got {wc}).")
+        return v
+
+
+class GroundedQAOutput(BaseModel):
+    """Schema for Prompt 15: 15_grounded_qa.md"""
+    answerable: bool = Field(...)
+    answer: str = Field(..., min_length=5)
+    claims: List[GroundedClaimItem] = Field(default_factory=list)
+    follow_ups: List[str] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_answerable_claims(self) -> "GroundedQAOutput":
+        if self.answerable and not self.claims:
+            raise ValueError("Rule violation: When 'answerable' is true, 'claims' must contain at least one cited claim.")
+        return self

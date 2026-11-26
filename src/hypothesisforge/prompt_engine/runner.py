@@ -25,6 +25,7 @@ from .fallbacks import (
     RuleBasedConflictExplainer,
     RuleBasedPriorWorkReporter,
     RuleBasedSpokenExplainer,
+    RuleBasedGroundedQA,
 )
 from .models import (
     LiteratureExtractionOutput,
@@ -41,6 +42,7 @@ from .models import (
     ConflictExplainerOutput,
     PriorWorkEvidenceOutput,
     SpokenExplanationOutput,
+    GroundedQAOutput,
 )
 
 
@@ -997,6 +999,72 @@ class PromptRunner:
             )
 
         fallback_data = RuleBasedSpokenExplainer.format(result_json)
+        return PromptExecutionResult(
+            prompt_name=prompt_def.name,
+            prompt_version=prompt_def.version,
+            data=fallback_data,
+            raw_output=retry_reply,
+            retries_used=1,
+            used_fallback=True,
+            validation_error=retry_val.error_message or val.error_message,
+        )
+
+    def run_grounded_qa(
+        self,
+        standalone_question: str,
+        passages: Any,
+        llm_fn: Optional[LLMCallable] = None,
+    ) -> PromptExecutionResult:
+        """Runs Prompt 15: 15_grounded_qa.md"""
+        import json as _json
+
+        prompt_def = self.loader.load_prompt("15_grounded_qa")
+        passages_str = _json.dumps(passages, ensure_ascii=False) if isinstance(passages, (list, dict)) else str(passages)
+        user_prompt = prompt_def.render_user_prompt(
+            standalone_question=standalone_question,
+            passages=passages_str,
+        )
+
+        if llm_fn is None:
+            fallback_data = RuleBasedGroundedQA.answer(standalone_question, passages)
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version="not used",
+                data=fallback_data,
+                raw_output="[No LLM configured - Rule-based grounded QA executed]",
+                retries_used=0,
+                used_fallback=True,
+                prompt_used=False,
+            )
+
+        raw_reply = llm_fn(prompt_def.system_prompt, user_prompt)
+        val = ResponseValidator.validate_grounded_qa(raw_reply, passages_source=passages_str)
+
+        if val.is_valid and val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=val.data,
+                raw_output=raw_reply,
+                retries_used=0,
+                used_fallback=False,
+            )
+
+        retry_prompt = f"{user_prompt}\n\nIMPORTANT CORRECTION: {val.retry_prompt}"
+        retry_reply = llm_fn(prompt_def.system_prompt, retry_prompt)
+        retry_val = ResponseValidator.validate_grounded_qa(retry_reply, passages_source=passages_str)
+
+        if retry_val.is_valid and retry_val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=retry_val.data,
+                raw_output=retry_reply,
+                retries_used=1,
+                used_fallback=False,
+            )
+
+        fallback_data = RuleBasedGroundedQA.answer(standalone_question, passages)
         return PromptExecutionResult(
             prompt_name=prompt_def.name,
             prompt_version=prompt_def.version,

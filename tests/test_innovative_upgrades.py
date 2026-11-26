@@ -337,3 +337,35 @@ def test_prompt_14_spoken_explainer():
     too_long = " ".join(["word"] * 125)
     bad_len = f'{{"spoken_text":"{too_long}","sources":["P-1 p.1"]}}'
     assert ResponseValidator.validate_spoken_explanation(bad_len).is_valid is False
+
+
+def test_prompt_15_grounded_qa():
+    from hypothesisforge.prompt_engine.models import count_words
+    from hypothesisforge.prompt_engine.validator import ResponseValidator
+
+    runner = PromptRunner()
+    passages = [
+        {"id": "P-101", "page": 4, "text": "ResNet-50 achieves 84.6% accuracy on PACS under leave-one-domain-out."},
+        {"id": "P-102", "page": 7, "text": "ViT-B/16 reaches 88.2% accuracy on OfficeHome."},
+    ]
+
+    # 1. Answerable question
+    res_ok = runner.run_grounded_qa("What accuracy does ResNet-50 achieve on PACS?", passages, llm_fn=None)
+    assert res_ok.data.answerable is True
+    assert len(res_ok.data.claims) >= 1
+    assert res_ok.data.claims[0].paper_id == "P-101"
+    assert res_ok.data.claims[0].page == 4
+    assert count_words(res_ok.data.claims[0].quote) <= 25
+
+    # 2. Unanswerable question -> answerable=False
+    res_no = runner.run_grounded_qa("What is the boiling point of liquid nitrogen?", passages, llm_fn=None)
+    assert res_no.data.answerable is False
+    assert "missing" in res_no.data.answer.lower()
+
+    # 3. Validator rejects > 25-word quote or ungrounded quote
+    long_q = " ".join(["word"] * 26)
+    bad_len = f'{{"answerable":true,"answer":"Answer [P-101, 4].","claims":[{{"text":"Claim text","paper_id":"P-101","page":4,"quote":"{long_q}"}}],"follow_ups":[]}}'
+    assert ResponseValidator.validate_grounded_qa(bad_len).is_valid is False
+
+    bad_ungrounded = '{"answerable":true,"answer":"Answer [P-101, 4].","claims":[{"text":"Claim text","paper_id":"P-101","page":4,"quote":"Fabricated quote not in text."}],"follow_ups":[]}'
+    assert ResponseValidator.validate_grounded_qa(bad_ungrounded, passages_source=passages[0]["text"]).is_valid is False

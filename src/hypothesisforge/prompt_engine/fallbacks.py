@@ -25,6 +25,8 @@ from .models import (
     ClosestPaperItem,
     PriorWorkEvidenceOutput,
     SpokenExplanationOutput,
+    GroundedClaimItem,
+    GroundedQAOutput,
     count_words,
 )
 
@@ -1171,3 +1173,96 @@ class RuleBasedSpokenExplainer:
 
         spoken_text = f"{body_text} {source_clause}".strip()
         return SpokenExplanationOutput(spoken_text=spoken_text, sources=sources[:6])
+
+
+class RuleBasedGroundedQA:
+    """Deterministic fallback for Prompt 15 (Grounded JSON Passage Q&A)."""
+
+    @staticmethod
+    def _parse_passages(passages: Any) -> List[Dict[str, Any]]:
+        if isinstance(passages, list):
+            return [p for p in passages if isinstance(p, dict)]
+        if isinstance(passages, str) and passages.strip():
+            try:
+                loaded = json.loads(passages)
+                if isinstance(loaded, list):
+                    return [p for p in loaded if isinstance(p, dict)]
+            except Exception:
+                pass
+            # Parse formatted blocks like "[1] (P-123, Page 4): text"
+            blocks: List[Dict[str, Any]] = []
+            for m in re.finditer(r"\[(\d+)\]\s*\(([^,]+),\s*Page\s*(\d+)\):\s*(.+?)(?=\n\[\d+\]|\Z)", passages, re.S | re.I):
+                blocks.append({
+                    "id": m.group(2).strip(),
+                    "page": int(m.group(3)),
+                    "text": m.group(4).strip(),
+                })
+            return blocks
+        return []
+
+    @classmethod
+    def answer(cls, standalone_question: str, passages: Any) -> GroundedQAOutput:
+        items = cls._parse_passages(passages)
+        q_tokens = {
+            t.lower()
+            for t in re.findall(r"\w+", standalone_question)
+            if len(t) >= 3 and t.lower() not in {"what", "which", "where", "when", "does", "that", "this", "with", "from", "the", "and", "for", "are", "how"}
+        }
+
+        scored: List[Tuple[int, str, int, str]] = []
+        for item in items:
+            pid = str(item.get("paper_id") or item.get("id") or "P-CORPUS").strip()
+            try:
+                page = max(0, int(item.get("page", 1)))
+            except Exception:
+                page = 1
+            text = str(item.get("text") or "").strip()
+            for sent in re.split(r"(?<=[.!?])\s+", text):
+                sent_clean = sent.strip()
+                if len(sent_clean) < 10:
+                    continue
+                s_low = sent_clean.lower()
+                hits = sum(1 for tok in q_tokens if tok in s_low)
+                if hits > 0:
+                    scored.append((hits, pid, page, sent_clean))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if not scored:
+            missing_terms = ", ".join(sorted(q_tokens)[:5]) if q_tokens else "the requested topic"
+            return GroundedQAOutput(
+                answerable=False,
+                answer=f"The provided passages do not answer this question; missing direct evidence about {missing_terms}.",
+                claims=[],
+                follow_ups=[
+                    "Which specific paper or dataset should be searched next?",
+                    "Would you like to expand the search to arXiv or OpenAlex?",
+                ],
+            )
+
+        claims: List[GroundedClaimItem] = []
+        ans_parts: List[str] = []
+        seen_quotes = set()
+        for _, pid, page, sent_clean in scored[:3]:
+            quote = " ".join(sent_clean.split()[:25])
+            if quote in seen_quotes:
+                continue
+            seen_quotes.add(quote)
+            claims.append(
+                GroundedClaimItem(
+                    text=sent_clean,
+                    paper_id=pid,
+                    page=page,
+                    quote=quote,
+                )
+            )
+            ans_parts.append(f"{sent_clean.rstrip('.')} [{pid}, p.{page}].")
+
+        return GroundedQAOutput(
+            answerable=True,
+            answer=" ".join(ans_parts),
+            claims=claims,
+            follow_ups=[
+                "What experimental split was used for this result?",
+                "Do other papers in the corpus report different numbers?",
+            ],
+        )
