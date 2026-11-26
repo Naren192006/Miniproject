@@ -871,6 +871,47 @@ with tabs[3]:
         side_a_html = _fmt_side(pa_id, pa_title, rec_a, res_a)
         side_b_html = _fmt_side(pb_id, pb_title, rec_b, res_b)
 
+        # Extract concrete models, datasets, values for specific Gap & Actionable Project Idea
+        arch_a = (getattr(res_a, "model", None) if res_a else None) or (", ".join(rec_a.architectures[:2]) if rec_a and rec_a.architectures else "Model A")
+        arch_b = (getattr(res_b, "model", None) if res_b else None) or (", ".join(rec_b.architectures[:2]) if rec_b and rec_b.architectures else "Model B")
+        ds_a = (res_a.dataset if res_a and res_a.dataset else None) or (", ".join(rec_a.datasets[:1]) if rec_a and rec_a.datasets else "Not stated")
+        ds_b = (res_b.dataset if res_b and res_b.dataset else None) or (", ".join(rec_b.datasets[:1]) if rec_b and rec_b.datasets else "Not stated")
+        met_a = (res_a.metric if res_a and res_a.metric else "Accuracy")
+        val_a_str = str(res_a.value) if res_a and res_a.value is not None else "n/a"
+        val_b_str = str(res_b.value) if res_b and res_b.value is not None else "n/a"
+
+        all_models_list = list(dict.fromkeys(
+            m.strip() for m in (arch_a + "," + arch_b).split(",") if m.strip() and m.strip() != "Not stated"
+        ))
+        all_models_txt = ", ".join(all_models_list[:4]) if all_models_list else "both models"
+
+        factors_txt = ", ".join(cj.conflict_factors) if cj.conflict_factors else "dataset, metric, or split"
+        if ds_a == "Not stated" and ds_b == "Not stated":
+            gap_specific = (
+                f"{pa_id} tested {arch_a} ({val_a_str}), while {pb_id} tested {arch_b} ({val_b_str}) — "
+                f"neither paper states the exact dataset or train/test split, so you cannot tell which model is actually better."
+            )
+            build_specific = (
+                f"Run {all_models_txt} together on one shared dataset with the exact same train/test split, "
+                f"metric ({met_a}), and 3–5 random seeds to settle the comparison fairly."
+            )
+        elif ds_a.lower() != ds_b.lower():
+            gap_specific = (
+                f"{pa_id} tested {arch_a} on {ds_a} ({val_a_str}), while {pb_id} tested {arch_b} on {ds_b} ({val_b_str}) — "
+                f"neither paper cross-tested on the other's dataset."
+            )
+            build_specific = (
+                f"Evaluate {all_models_txt} on both {ds_a} and {ds_b} under one shared split and 3–5 random seeds."
+            )
+        else:
+            gap_specific = (
+                f"Both {pa_id} ({arch_a}: {val_a_str}) and {pb_id} ({arch_b}: {val_b_str}) report on {ds_a}, "
+                f"but differ on {factors_txt if 'factors_txt' in locals() else 'training conditions'}."
+            )
+            build_specific = (
+                f"Re-run {all_models_txt} on {ds_a} with matched hyperparameters, split, and 3–5 random seeds."
+            )
+
         # Plain-English issue summary
         cls_low = cj.classification.lower()
         factors_txt = ", ".join(cj.conflict_factors) if cj.conflict_factors else "dataset, metric, or split"
@@ -911,7 +952,10 @@ with tabs[3]:
                     <div style="margin-bottom:0.35rem;">{side_a_html}</div>
                     <div>{side_b_html}</div>
                 </div>
-                <p style="margin-bottom:0.5rem; color:#334155;">{esc(cj.explanation)}</p>
+                <div style="background:#f0fdf4; border-left:3px solid #16a34a; padding:0.5rem 0.75rem; margin-bottom:0.55rem; font-size:0.88rem; color:#14532d;">
+                    <div><strong>Specific Gap Found:</strong> {esc(gap_specific)}</div>
+                    <div style="margin-top:0.25rem;"><strong>What You Can Build:</strong> {esc(build_specific)}</div>
+                </div>
                 <div style="font-size:0.85rem; font-weight:600; color:#475569;">Conditions to Verify:</div>
                 <ul style="margin:0.25rem 0 0 1.2rem; color:#334155; font-size:0.88rem;">{cond_html}</ul>
             </div>""",
