@@ -425,3 +425,26 @@ class QueryRewriteOutput(BaseModel):
     ] = Field(..., description="Classified user intent")
     sub_queries: List[str] = Field(..., min_length=1, max_length=3, description="At most 3 sub-queries")
     needs_external_search: bool = Field(default=False, description="True only if corpus unlikely to contain answer")
+
+
+# ==============================================================================
+# Prompt 10: Project-Topic Interviewer Models
+# ==============================================================================
+
+class TopicInterviewOutput(BaseModel):
+    """Schema for Prompt 10: 10_topic_interviewer.md"""
+    ready: bool = Field(...)
+    next_question: str = Field(default="")
+    missing_fields: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_interview_state(self) -> "TopicInterviewOutput":
+        if self.ready:
+            if self.missing_fields:
+                raise ValueError("When 'ready' is true, 'missing_fields' must be empty.")
+        else:
+            if not self.missing_fields:
+                raise ValueError("When 'ready' is false, 'missing_fields' must list at least one missing field.")
+            if not self.next_question or len(self.next_question.strip()) < 5:
+                raise ValueError("When 'ready' is false, 'next_question' must ask one short question.")
+        return self

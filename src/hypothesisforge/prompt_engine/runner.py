@@ -20,6 +20,7 @@ from .fallbacks import (
     RuleBasedReportSummarizer,
     RuleBasedEvidenceAnswerer,
     RuleBasedQueryRewriter,
+    RuleBasedTopicInterviewer,
 )
 from .models import (
     LiteratureExtractionOutput,
@@ -31,6 +32,7 @@ from .models import (
     ReportSummaryOutput,
     EvidenceAnswerOutput,
     QueryRewriteOutput,
+    TopicInterviewOutput,
 )
 
 
@@ -623,6 +625,68 @@ class PromptRunner:
             )
 
         fallback_data = RuleBasedQueryRewriter.rewrite(history, question)
+        return PromptExecutionResult(
+            prompt_name=prompt_def.name,
+            prompt_version=prompt_def.version,
+            data=fallback_data,
+            raw_output=retry_reply,
+            retries_used=1,
+            used_fallback=True,
+            validation_error=retry_val.error_message or val.error_message,
+        )
+
+    def run_topic_interview(
+        self,
+        answers: Any,
+        llm_fn: Optional[LLMCallable] = None,
+    ) -> PromptExecutionResult:
+        """Runs Prompt 10: 10_topic_interviewer.md"""
+        import json as _json
+
+        prompt_def = self.loader.load_prompt("10_topic_interviewer")
+        answers_str = _json.dumps(answers, ensure_ascii=False) if isinstance(answers, dict) else str(answers or "{}")
+        user_prompt = prompt_def.render_user_prompt(answers=answers_str)
+
+        if llm_fn is None:
+            fallback_data = RuleBasedTopicInterviewer.interview(answers)
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version="not used",
+                data=fallback_data,
+                raw_output="[No LLM configured - Rule-based topic interviewer executed]",
+                retries_used=0,
+                used_fallback=True,
+                prompt_used=False,
+            )
+
+        raw_reply = llm_fn(prompt_def.system_prompt, user_prompt)
+        val = ResponseValidator.validate_topic_interview(raw_reply)
+
+        if val.is_valid and val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=val.data,
+                raw_output=raw_reply,
+                retries_used=0,
+                used_fallback=False,
+            )
+
+        retry_prompt = f"{user_prompt}\n\nIMPORTANT CORRECTION: {val.retry_prompt}"
+        retry_reply = llm_fn(prompt_def.system_prompt, retry_prompt)
+        retry_val = ResponseValidator.validate_topic_interview(retry_reply)
+
+        if retry_val.is_valid and retry_val.data:
+            return PromptExecutionResult(
+                prompt_name=prompt_def.name,
+                prompt_version=prompt_def.version,
+                data=retry_val.data,
+                raw_output=retry_reply,
+                retries_used=1,
+                used_fallback=False,
+            )
+
+        fallback_data = RuleBasedTopicInterviewer.interview(answers)
         return PromptExecutionResult(
             prompt_name=prompt_def.name,
             prompt_version=prompt_def.version,

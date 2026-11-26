@@ -1011,13 +1011,62 @@ with tabs[6]:
     st.subheader("Topic & Scope Advisor")
     st.caption("Short scope interview -> recommends 3-5 mini or major options grounded strictly in the active Gap Matrix.")
 
+    if "topic_interview_answers" not in st.session_state:
+        st.session_state["topic_interview_answers"] = {}
+
+    ans_dict = st.session_state["topic_interview_answers"]
+    interview_res = PromptRunner().run_topic_interview(answers=ans_dict, llm_fn=llm_fn)
+    interview_state = interview_res.data
+
+    with st.expander("Guided Interview (Prompt 10)", expanded=not interview_state.ready):
+        if interview_state.ready:
+            st.success("All 6 interview fields collected. Recommendations below are tailored to your answers.")
+            st.json(ans_dict)
+        else:
+            current_field = interview_state.missing_fields[0]
+            st.markdown(f"**Question ({len(ans_dict) + 1}/6):** {interview_state.next_question}")
+            st.caption(f"Missing fields: {', '.join(interview_state.missing_fields)}")
+            with st.form("topic_interview_form", clear_on_submit=True):
+                user_ans = st.text_input("Your answer", key="topic_interview_input")
+                submitted = st.form_submit_button("Save Answer")
+                if submitted and user_ans.strip():
+                    ans_dict[current_field] = user_ans.strip()
+                    st.rerun()
+        if ans_dict and st.button("Reset Interview", key="reset_topic_interview"):
+            st.session_state["topic_interview_answers"] = {}
+            st.rerun()
+
+    # Derive defaults from guided interview if answered
+    default_goal_idx = 0
+    lvl_ans = str(ans_dict.get("project_level", "")).lower()
+    if "mini" in lvl_ans:
+        default_goal_idx = 1
+    elif "major" in lvl_ans or "thesis" in lvl_ans:
+        default_goal_idx = 2
+
+    default_compute_idx = 1
+    comp_ans = str(ans_dict.get("compute_access", "")).lower()
+    if any(k in comp_ans for k in ["none", "laptop", "cpu"]):
+        default_compute_idx = 0
+    elif "multi" in comp_ans:
+        default_compute_idx = 2
+
+    default_weeks = 6
+    try:
+        import re as _re
+        wk_match = _re.search(r"\d+", str(ans_dict.get("available_weeks", "")))
+        if wk_match:
+            default_weeks = max(2, min(16, int(wk_match.group(0))))
+    except Exception:
+        pass
+
     sc1, sc2, sc3 = st.columns(3)
     with sc1:
-        target_scope = st.selectbox("Target Project Scale", ["Any", "Mini Project", "Major Project"])
+        target_scope = st.selectbox("Target Project Scale", ["Any", "Mini Project", "Major Project"], index=default_goal_idx)
     with sc2:
-        compute_budget = st.selectbox("Available Compute", ["CPU / Colab Free", "Single GPU", "Multi-GPU"], index=1)
+        compute_budget = st.selectbox("Available Compute", ["CPU / Colab Free", "Single GPU", "Multi-GPU"], index=default_compute_idx)
     with sc3:
-        timeline_weeks = st.slider("Available Timeline (weeks)", min_value=2, max_value=16, value=6)
+        timeline_weeks = st.slider("Available Timeline (weeks)", min_value=2, max_value=16, value=default_weeks)
 
     interview = ScopeInterview(
         timeline_weeks=timeline_weeks,

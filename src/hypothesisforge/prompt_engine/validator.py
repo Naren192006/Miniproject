@@ -19,6 +19,7 @@ from .models import (
     ReportSummaryOutput,
     EvidenceAnswerOutput,
     QueryRewriteOutput,
+    TopicInterviewOutput,
     count_words,
 )
 
@@ -472,6 +473,31 @@ class ResponseValidator:
                 raw_json=parsed_json,
                 error_message=msg,
                 retry_prompt=f"Validation errors:\n{msg}\nReturn valid JSON with at most 3 sub_queries.",
+            )
+
+        return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)
+
+    @classmethod
+    def validate_topic_interview(cls, raw_text: str) -> ValidationResult:
+        """Validates Prompt 10 (10_topic_interviewer.md) JSON output."""
+        parsed_json, error = cls.parse_json_object(raw_text)
+        if error or parsed_json is None:
+            return ValidationResult(
+                is_valid=False,
+                error_message=error,
+                retry_prompt=f"Error in previous response: {error}. Output JSON only.",
+            )
+
+        try:
+            output = TopicInterviewOutput.model_validate(parsed_json)
+        except ValidationError as ve:
+            error_details = [f"Field '{' -> '.join(str(l) for l in err['loc'])}': {err['msg']}" for err in ve.errors()]
+            msg = "; ".join(error_details)
+            return ValidationResult(
+                is_valid=False,
+                raw_json=parsed_json,
+                error_message=msg,
+                retry_prompt=f"Validation errors:\n{msg}\nAsk ONE short plain-language question for the most important missing field, or set ready: true if none are missing.",
             )
 
         return ValidationResult(is_valid=True, data=output, raw_json=parsed_json)

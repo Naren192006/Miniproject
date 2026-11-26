@@ -18,6 +18,7 @@ from .models import (
     ReportSummaryOutput,
     EvidenceAnswerOutput,
     QueryRewriteOutput,
+    TopicInterviewOutput,
     count_words,
 )
 
@@ -711,3 +712,46 @@ class RuleBasedQueryRewriter:
             sub_queries=sub_queries,
             needs_external_search=needs_external,
         )
+
+
+class RuleBasedTopicInterviewer:
+    """Deterministic fallback for Prompt 10 (Project-Topic Interviewer)."""
+
+    REQUIRED_FIELDS: List[Tuple[str, str]] = [
+        ("field_of_interest", "What research area or topic are you most interested in exploring?"),
+        ("project_level", "Are you planning a mini project, a major project, or a thesis?"),
+        ("compute_access", "What compute hardware do you have access to (none, laptop CPU, or GPU)?"),
+        ("available_weeks", "How many weeks do you have available to complete this project?"),
+        ("current_skills", "What programming or machine learning skills do you already have?"),
+        ("preferred_outcome", "What outcome do you want most (e.g., working prototype, benchmark study, or paper)?"),
+    ]
+
+    @classmethod
+    def interview(cls, answers: Any) -> TopicInterviewOutput:
+        parsed: Dict[str, Any] = {}
+        if isinstance(answers, dict):
+            parsed = dict(answers)
+        elif isinstance(answers, str) and answers.strip():
+            try:
+                loaded = json.loads(answers)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                for line in answers.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        parsed[k.strip().lower()] = v.strip()
+
+        normalized = {str(k).strip().lower(): v for k, v in parsed.items()}
+        missing: List[str] = []
+        next_q = ""
+        for field, question in cls.REQUIRED_FIELDS:
+            val = normalized.get(field)
+            if val is None or str(val).strip() == "":
+                missing.append(field)
+                if not next_q:
+                    next_q = question
+
+        if not missing:
+            return TopicInterviewOutput(ready=True, next_question="", missing_fields=[])
+        return TopicInterviewOutput(ready=False, next_question=next_q, missing_fields=missing)

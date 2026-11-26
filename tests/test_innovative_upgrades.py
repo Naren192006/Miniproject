@@ -148,3 +148,34 @@ def test_topic_and_scope_advisor_grounded_in_gap_matrix():
     # Every recommended option must come directly from the gap matrix
     gap_labels = {g["gap_label"] for g in res.candidate_gaps}
     assert all(opt.gap_label in gap_labels for opt in options)
+
+
+def test_prompt_10_topic_interviewer():
+    runner = PromptRunner()
+    # Empty answers -> asks first missing field
+    r1 = runner.run_topic_interview(answers={}, llm_fn=None)
+    assert r1.data.ready is False
+    assert "field_of_interest" in r1.data.missing_fields
+    assert len(r1.data.next_question) >= 5
+
+    # Partial answers -> skips answered fields
+    r2 = runner.run_topic_interview(
+        answers={"field_of_interest": "Domain Generalization", "project_level": "mini"},
+        llm_fn=None,
+    )
+    assert r2.data.ready is False
+    assert "field_of_interest" not in r2.data.missing_fields
+    assert "project_level" not in r2.data.missing_fields
+
+    # All 6 required fields present -> ready=True
+    full_answers = {
+        "field_of_interest": "Domain Generalization",
+        "current_skills": "Python, PyTorch",
+        "available_weeks": "6",
+        "compute_access": "laptop",
+        "project_level": "mini",
+        "preferred_outcome": "working prototype",
+    }
+    r3 = runner.run_topic_interview(answers=full_answers, llm_fn=None)
+    assert r3.data.ready is True
+    assert r3.data.missing_fields == []
