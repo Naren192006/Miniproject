@@ -487,16 +487,20 @@ def answer_workspace_question(
     if intent in {"gap", "contradiction", "compare", "topic_advice"} or any(
         kw in q_low for kw in ["hypothesis", "hypotheses", "critic", "experiment"]
     ):
-        if not result.candidate_gaps and not result.experiment_plans and not result.contradictions:
+        all_archs = sorted({a for rec in result.literature_records.values() for a in rec.architectures})
+        all_datasets = sorted({d for rec in result.literature_records.values() for d in rec.datasets})
+        all_methods = sorted({m for rec in result.literature_records.values() for m in rec.training_strategies})
+
+        if not result.candidate_gaps and not result.experiment_plans and not result.contradictions and not all_archs and not all_datasets:
             return (
-                "No candidate gaps, contradictions, or experiment plans were generated for the current corpus yet. "
+                "No candidate gaps, contradictions, models, or datasets were extracted from the current corpus yet. "
                 "Try searching a broader topic or uploading papers with explicit models and benchmarks.",
                 "",
                 f"Intent: {intent} (No data)",
             )
 
         wants_simple = any(w in q_low for w in ["simple", "understand", "explain", "easy", "plain", "beginner"])
-        wants_build = any(w in q_low for w in ["build", "experiment", "steps", "run", "implement", "how do i"])
+        wants_build = any(w in q_low for w in ["build", "experiment", "steps", "run", "implement", "how do i", "what should i use"])
         wants_hypotheses = any(w in q_low for w in ["hypothesis", "hypotheses", "critic"])
 
         lines: List[str] = []
@@ -517,9 +521,46 @@ def answer_workspace_question(
                 for idx, (gap_label, hyp) in enumerate(result.hypotheses[:4], start=1):
                     lines.append(f"- **H{idx} ({gap_label}):** {hyp.statement or hyp.reason}")
         elif intent == "topic_advice":
-            lines.append("**Recommended options from the Gap Matrix (see Scope Advisor tab for full filtering):**")
-            for g in result.candidate_gaps[:4]:
-                lines.append(f"- **{g['gap_label']}** — derived directly from corpus records.")
+            wants_roadmap = any(w in q_low for w in ["roadmap", "step by step", "step-by-step", "how to start", "action plan", "schedule"])
+            if wants_roadmap:
+                top_ds = ", ".join(all_datasets[:2]) or "a shared benchmark dataset"
+                top_models = ", ".join(all_archs[:4]) or "your selected baseline and candidate models"
+                top_methods = ", ".join(all_methods[:3]) or "standard training & fine-tuning"
+                top_papers = ", ".join(p.paper_id for p in result.papers[:3])
+                lines.append(f"**Project Roadmap (grounded in {len(result.papers)} loaded papers):**")
+                lines.append(f"1. **Read & Lock Setup:** Review {top_papers} and fix one shared dataset ({top_ds}) and train/test split.")
+                lines.append(f"2. **Build Models:** Implement {top_models} in Python + PyTorch/scikit-learn using {top_methods} with identical hyperparameters.")
+                lines.append("3. **Run Multi-Seed Experiments:** Train and evaluate each model across 3–5 random seeds (e.g., seeds 42, 43, 44).")
+                lines.append("4. **Compare & Document:** Report mean ± std accuracy/metrics, paired significance test, and note any dataset or compute limits.")
+            else:
+                if result.candidate_gaps:
+                    lines.append("**What you can build from the Gap Matrix:**")
+                    for g in result.candidate_gaps[:4]:
+                        lines.append(f"- **{g['gap_label']}** — not found in the {len(result.papers)} loaded papers.")
+                elif result.contradictions:
+                    lines.append("**What you can build from the paper comparisons:**")
+                    for pair_title, cj in result.contradictions[:3]:
+                        lines.append(f"- **Controlled replication of {pair_title}** ({cj.classification}) — test both models on one shared dataset and split.")
+                else:
+                    lines.append(f"**What you can build from the {len(result.papers)} loaded papers:**")
+                    if all_archs or all_datasets:
+                        lines.append(
+                            f"- Compare **{', '.join(all_archs[:4]) or 'the reported models'}** on "
+                            f"**{', '.join(all_datasets[:3]) or 'a shared benchmark dataset'}** under one unified train/test split."
+                        )
+                if result.experiment_plans:
+                    _, plan = result.experiment_plans[0]
+                    lines.append(
+                        f"**What to use to build it:** Dataset: {plan.dataset_and_split} · Baselines: {', '.join(plan.baselines)} · "
+                        f"Metrics: {', '.join(plan.metrics)} · Tools: Python, PyTorch/scikit-learn, and 3+ random seeds."
+                    )
+                else:
+                    lines.append(
+                        f"**What to use to build it:** Python + PyTorch or scikit-learn, "
+                        f"models ({', '.join(all_archs[:4]) or 'ResNet / ViT / baseline'}), "
+                        f"datasets ({', '.join(all_datasets[:3]) or 'benchmark from the papers'}), "
+                        f"methods ({', '.join(all_methods[:3]) or 'standard ERM / augmentation'}), and 3–5 random seeds."
+                    )
         elif wants_simple and wants_build:
             if result.candidate_gaps:
                 top_gap = result.candidate_gaps[0]

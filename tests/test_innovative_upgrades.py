@@ -369,3 +369,53 @@ def test_prompt_15_grounded_qa():
 
     bad_ungrounded = '{"answerable":true,"answer":"Answer [P-101, 4].","claims":[{"text":"Claim text","paper_id":"P-101","page":4,"quote":"Fabricated quote not in text."}],"follow_ups":[]}'
     assert ResponseValidator.validate_grounded_qa(bad_ungrounded, passages_source=passages[0]["text"]).is_valid is False
+
+
+def test_ask_papers_what_can_i_build_not_out_of_scope():
+    pipeline_res = run_full_pipeline(get_sample_corpus(), llm_fn=None)
+    ans, _, note = answer_workspace_question(
+        question="what can i build? and what should i use to build it",
+        result=pipeline_res,
+        llm_fn=None,
+    )
+    assert "out_of_scope" not in note
+    assert "What you can build" in ans
+    assert "What to use to build it" in ans
+
+    ans_road, _, note_road = answer_workspace_question(
+        question="tell me the roadmap",
+        result=pipeline_res,
+        llm_fn=None,
+    )
+    assert "topic_advice" in note_road
+    assert "Project Roadmap" in ans_road
+
+
+def test_rag_typo_tolerance_boilerplate_filtering_and_tfidf():
+    from hypothesisforge.ingestion import TextChunk, retrieve_passages
+    from hypothesisforge.prompt_engine.fallbacks import RuleBasedEvidenceAnswerer
+
+    # 1. Typo-tolerant summary routing ("summaarize the researchh papers")
+    pipeline_res = run_full_pipeline(get_sample_corpus(), llm_fn=None)
+    ans_sum, _, note_sum = answer_workspace_question(
+        question="summaarize the researchh papers",
+        result=pipeline_res,
+        llm_fn=None,
+    )
+    assert "summary" in note_sum
+    assert len(ans_sum) > 20
+
+    # 2. Boilerplate filtering + TF-IDF ranking
+    chunks = [
+        TextChunk(1, "P-1", "Paper 1", 10, "Acknowledgements Funded by DFG. Author Contributions and Competing Interests."),
+        TextChunk(2, "P-1", "Paper 1", 2, "DenseNet-121 achieved 92.4% AUC on ChestX-ray14 multi-label classification."),
+    ]
+    formatted, selected = retrieve_passages("what accuracy did DenseNet get?", chunks, top_k=2)
+    assert len(selected) == 1
+    assert selected[0].page == 2
+    assert "Acknowledgements" not in formatted
+
+    # 3. Synonym/stem matching in RuleBasedEvidenceAnswerer
+    ans_ev = RuleBasedEvidenceAnswerer.answer("what accuracy did DenseNet get?", formatted)
+    assert ans_ev.is_declined is False
+    assert "92.4%" in ans_ev.text

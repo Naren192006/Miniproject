@@ -133,10 +133,26 @@ def extract_pdf_bytes(file_bytes: bytes, filename: str, paper_id: str = "") -> P
     )
 
 
+def _is_boilerplate_chunk(text: str) -> bool:
+    """Detects back-matter boilerplate (Acknowledgements, Competing Interests, Author Contributions)."""
+    low = text.lower()
+    markers = (
+        "competing interests",
+        "author contributions",
+        "publisher's note",
+        "acknowledgements",
+        "acknowledgments",
+        "correspondence and requests for materials",
+        "supplementary information",
+    )
+    return any(m in low for m in markers)
+
+
 def retrieve_passages(question: str, all_chunks: List[TextChunk], top_k: int = 5) -> Tuple[str, List[TextChunk]]:
     """
-    Retrieves top-k relevant passages for a question using keyword/term-overlap scoring.
-    Returns empty string if no passages have meaningful relevance, avoiding irrelevant quotes.
+    Retrieves top-k relevant passages using TF-IDF cosine similarity + exact acronym/stem boost,
+    while filtering out back-matter boilerplate (Acknowledgements, Competing Interests).
+    Returns empty string if no passages have meaningful relevance.
     """
     if not all_chunks:
         return "", []
@@ -153,16 +169,49 @@ def retrieve_passages(question: str, all_chunks: List[TextChunk], top_k: int = 5
     if not q_terms:
         return "", []
 
-    scored: List[Tuple[int, TextChunk]] = []
-    for chunk in all_chunks:
+    # Filter out back-matter boilerplate unless user specifically asks about authors/funding
+    wants_meta = any(k in question.lower() for k in ("author", "funding", "acknowledg", "grant", "conflict of interest"))
+    candidate_chunks = all_chunks if wants_meta else [c for c in all_chunks if not _is_boilerplate_chunk(c.text)]
+    if not candidate_chunks:
+        candidate_chunks = all_chunks
+
+    # Compute TF-IDF cosine similarity across candidate chunks
+    tfidf_scores: List[float] = [0.0] * len(candidate_chunks)
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        vec = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", lowercase=True)
+        mat = vec.fit_transform([c.text for c in candidate_chunks])
+        q_vec = vec.transform([question])
+        sims = cosine_similarity(q_vec, mat).flatten()
+        tfidf_scores = [float(s) for s in sims]
+    except Exception:
+        pass
+
+    scored: List[Tuple[float, TextChunk]] = []
+    acronyms = re.findall(r"\b[A-Z0-9\-]{2,}\b", question)
+    for idx_c, chunk in enumerate(candidate_chunks):
         c_text_lower = chunk.text.lower()
-        score = sum(2 if re.search(r"\b" + re.escape(t) + r"\b", c_text_lower) else 0 for t in q_terms)
-        # Boost exact uppercase acronyms / numbers (e.g., PACS, ERM, ViT)
-        for token in re.findall(r"\b[A-Z0-9\-]{2,}\b", question):
+        # Stem/prefix-aware lexical score (handles plurals, hyphens, e.g., dataset/datasets, pre-processing/preprocessing)
+        c_norm = re.sub(r"[-_]", "", c_text_lower)
+        lex_score = 0.0
+        for t in q_terms:
+            t_norm = re.sub(r"[-_]", "", t)
+            stem = t_norm[: max(4, len(t_norm) - 2)] if len(t_norm) >= 5 else t_norm
+            if re.search(r"\b" + re.escape(t) + r"\b", c_text_lower):
+                lex_score += 2.0
+            elif stem in c_norm:
+                lex_score += 1.2
+
+        # Exact uppercase acronyms / numbers boost (e.g., PACS, ERM, ViT, AUC)
+        for token in acronyms:
             if token in chunk.text:
-                score += 3
-        if score > 0:
-            scored.append((score, chunk))
+                lex_score += 3.0
+
+        total_score = (tfidf_scores[idx_c] * 10.0) + lex_score
+        if total_score > 0.35:
+            scored.append((total_score, chunk))
 
     if not scored:
         return "", []

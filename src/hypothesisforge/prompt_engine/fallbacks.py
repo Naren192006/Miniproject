@@ -613,6 +613,14 @@ class RuleBasedEvidenceAnswerer:
             "what", "which", "does", "that", "this", "with", "from", "have", "about",
             "they", "their", "were", "when", "where", "how", "build", "make", "using",
             "want", "need", "give", "tell", "show", "explain", "paper", "papers", "any",
+            "did", "get", "was", "are", "the", "and", "for",
+        }
+        synonyms = {
+            "accuracy": {"accuracy", "acc", "auc", "f1", "score", "performance", "precision", "recall"},
+            "dataset": {"dataset", "datasets", "data", "benchmark", "corpus"},
+            "method": {"method", "methods", "approach", "technique", "preprocessing", "pre-processing", "algorithm"},
+            "model": {"model", "models", "architecture", "network", "backbone", "cnn", "transformer"},
+            "result": {"result", "results", "outcome", "achieved", "reached", "reported"},
         }
         question_words = {
             w for w in re.findall(r"[a-zA-Z0-9\-]{3,}", question.lower())
@@ -622,8 +630,20 @@ class RuleBasedEvidenceAnswerer:
             text = "The passages do not answer this question."
             return EvidenceAnswerOutput(text=text, paragraphs=[text], citations=[], is_declined=True)
 
-        # Score individual sentences inside each passage so we return the sentence that actually answers the question
-        scored_sentences: List[Tuple[int, int, str]] = []
+        # Expand with stem + domain synonyms for better recall
+        expanded_groups: List[set] = []
+        for w in question_words:
+            grp = {w}
+            w_norm = re.sub(r"[-_]", "", w)
+            if len(w_norm) >= 5:
+                grp.add(w_norm[: max(4, len(w_norm) - 2)])
+            for syn_key, syn_set in synonyms.items():
+                if w in syn_set or w == syn_key:
+                    grp |= syn_set
+            expanded_groups.append(grp)
+
+        # Score individual sentences inside each passage
+        scored_sentences: List[Tuple[float, int, str]] = []
         for p_num_str, p_text in passage_blocks:
             p_num = int(p_num_str)
             cleaned = re.sub(r"^\([^)]+\):\s*", "", p_text).strip()
@@ -633,7 +653,11 @@ class RuleBasedEvidenceAnswerer:
                 if len(sent_clean) < 15:
                     continue
                 s_low = sent_clean.lower()
-                hits = sum(1 for w in question_words if re.search(r"\b" + re.escape(w) + r"\b", s_low))
+                s_norm = re.sub(r"[-_]", "", s_low)
+                hits = 0.0
+                for grp in expanded_groups:
+                    if any(term in s_low or term in s_norm for term in grp):
+                        hits += 1.0
                 if hits > 0:
                     scored_sentences.append((hits, p_num, sent_clean))
 
@@ -642,12 +666,10 @@ class RuleBasedEvidenceAnswerer:
             return EvidenceAnswerOutput(text=text, paragraphs=[text], citations=[], is_declined=True)
 
         scored_sentences.sort(key=lambda x: x[0], reverse=True)
-        # Require meaningful match (at least 2 keyword hits, or 1 hit if question only had 1 keyword)
-        min_hits = 2 if len(question_words) >= 2 else 1
+        min_hits = 1.0 if len(question_words) <= 3 else 2.0
         top_sentences = [item for item in scored_sentences if item[0] >= min_hits][:3]
         if not top_sentences:
-            text = "The passages do not answer this question."
-            return EvidenceAnswerOutput(text=text, paragraphs=[text], citations=[], is_declined=True)
+            top_sentences = scored_sentences[:2]
 
         sentences_out: List[str] = []
         cited_nums: List[int] = []
@@ -686,23 +708,29 @@ class RuleBasedQueryRewriter:
                 last_entity = hist_entities[-1]
                 standalone = re.sub(r"\b(that dataset|that model|it)\b", last_entity, standalone, count=1, flags=re.I)
 
+        # Typo-tolerant intent matching (e.g., "summaarize" -> "summarize")
+        import difflib
+        q_words = re.findall(r"[a-z]+", q_low)
+        def _has_fuzzy(targets: List[str], cutoff: float = 0.78) -> bool:
+            return any(t in q_low for t in targets) or any(
+                difflib.get_close_matches(w, targets, n=1, cutoff=cutoff) for w in q_words if len(w) >= 5
+            )
+
         # Classify intent
-        if any(k in q_low for k in ["contradict", "disagree", "conflict"]):
-            intent = "contradiction"
-        elif any(k in q_low for k in ["scope", "mini", "major", "topic_advice", "which topic", "recommend a topic"]):
-            intent = "topic_advice"
-        elif any(k in q_low for k in ["gap", "gaps", "untested", "missing combination", "build"]):
-            # Note: "build a rocket" without corpus keywords is out_of_scope
-            if "rocket" in q_low or ("build" in q_low and not any(w in q_low for w in ["gap", "gaps", "experiment", "model", "dataset"])):
-                intent = "out_of_scope"
-            else:
-                intent = "gap"
-        elif any(k in q_low for k in ["compare", "versus", " vs ", "difference between"]):
-            intent = "compare"
-        elif any(k in q_low for k in ["summary", "summarize", "overview"]):
-            intent = "summary"
-        elif any(k in q_low for k in ["weather", "capital of", "recipe", "rocket"]):
+        if any(k in q_low for k in ["weather", "capital of", "recipe", "rocket", "pizza", "movie", "football"]):
             intent = "out_of_scope"
+        elif _has_fuzzy(["contradict", "contradiction", "disagree", "conflict"]):
+            intent = "contradiction"
+        elif _has_fuzzy(["scope", "mini", "major", "topic_advice", "which topic", "recommend a topic", "what can i build", "what should i build", "what should i use", "project idea", "roadmap", "step by step", "step-by-step", "how to start", "action plan"]):
+            intent = "topic_advice"
+        elif _has_fuzzy(["gap", "gaps", "untested", "missing combination", "build"]):
+            intent = "gap"
+        elif _has_fuzzy(["compare", "versus", "difference between"]) or " vs " in q_low:
+            intent = "compare"
+        elif _has_fuzzy(["summary", "summarize", "summarise", "overview"]) or any(
+            p in q_low for p in ["what are the papers about", "about these papers", "explain the papers"]
+        ):
+            intent = "summary"
         else:
             intent = "factual_qa"
 
